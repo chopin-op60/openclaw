@@ -1,5 +1,6 @@
-import { setImmediate } from "node:timers/promises";
+import { channel } from "node:diagnostics_channel";
 import { afterEach, expect, it, vi } from "vitest";
+import { observeHostDataSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
 import {
   replaceSessionEntry,
   replaceTranscriptEvents,
@@ -68,21 +69,24 @@ async function seedBroadcastHistory(storePath: string) {
 }
 
 it.each(["by-id", "count"] as const)(
-  "keeps the event loop available while broadcasting a stored %s read",
+  "reads stored %s data off-thread before broadcasting",
   async (kind) => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
       const { target, handler, broadcastToConnIds } = await seedBroadcastHistory(
         state.statePath("broadcast.sqlite"),
       );
       const snapshot = vi.spyOn(projection, "withCurrentProjectionSnapshot");
-      let eventLoopProgress = false;
-      const turn = setImmediate().then(() => {
-        eventLoopProgress = true;
-      });
-      let progressedBeforeDelivery = false;
+      const hostSql = observeHostDataSql(state.env);
+      const diagnostics = channel("openclaw.worker.task");
+      const tasks: unknown[] = [];
+      const record = (value: unknown) => {
+        tasks.push(value);
+      };
+      let tasksAtDelivery: unknown[] = [];
       broadcastToConnIds.mockImplementation(() => {
-        progressedBeforeDelivery = eventLoopProgress;
+        tasksAtDelivery = tasks.slice();
       });
+      diagnostics.subscribe(record);
       try {
         await handler({
           target,
@@ -99,10 +103,17 @@ it.each(["by-id", "count"] as const)(
           }),
           expect.any(Set),
         );
-        expect(progressedBeforeDelivery).toBe(true);
+        expect(tasksAtDelivery).toContainEqual(
+          expect.objectContaining({
+            worker: expect.stringMatching(/^session-transcript\.worker\./),
+            outcome: "ok",
+          }),
+        );
+        expect(hostSql.queries).toEqual([]);
         expect(snapshot).not.toHaveBeenCalled();
       } finally {
-        await turn;
+        diagnostics.unsubscribe(record);
+        hostSql.restore();
         snapshot.mockRestore();
       }
     });
