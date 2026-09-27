@@ -86,7 +86,10 @@ import {
 } from "../secrets/runtime.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { createChannelTestPluginBase, createTestRegistry } from "../test-utils/channel-plugins.js";
-import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
+import {
+  createGatewaySchedulerClock,
+  createTestGatewayScheduler,
+} from "../test-utils/gateway-scheduler-clock.js";
 import { isRecord } from "../utils.js";
 import { diffConfigPaths, diffGatewayReloadPaths } from "./config-diff.js";
 import {
@@ -1800,6 +1803,8 @@ describe("gateway hot reload model state", () => {
       const releaseReview = createDeferred();
       const releaseReconciliation = createDeferred();
       const cron = new CronService({
+        scheduler: createTestGatewayScheduler(),
+        nowMs: () => Date.now(),
         storePath: path.join(fixtureDir, "jobs.json"),
         cronEnabled: true,
         log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -1944,6 +1949,7 @@ describe("gateway hot reload model state", () => {
       hoisted.runtimeConfig.value = config;
       setRuntimeConfigSnapshot(config, config);
 
+      const scheduler = createTestGatewayScheduler();
       try {
         const actualCron =
           await vi.importActual<typeof import("./server-cron.js")>("./server-cron.js");
@@ -1956,6 +1962,7 @@ describe("gateway hot reload model state", () => {
         const buildInitialCron =
           initialOwner === "lazy" ? createLazyGatewayCronState : actualCron.buildGatewayCronService;
         const initialCronState = buildInitialCron({
+          scheduler,
           cfg: config,
           deps: {} as never,
           broadcast: vi.fn(),
@@ -1984,6 +1991,7 @@ describe("gateway hot reload model state", () => {
         }
 
         const handlers = createGatewayReloadHandlers({
+          scheduler,
           getState: () => {
             if (!state) {
               throw new Error("expected gateway state");
@@ -2013,6 +2021,7 @@ describe("gateway hot reload model state", () => {
         hoisted.buildGatewayCronService.mockImplementation(previousCronFactory);
         await writeFile(releasePath, "release").catch(() => {});
         await state?.cronState.cron.stopAndDrain?.();
+        await scheduler.stop();
         spawn.mockRestore();
         vi.unstubAllEnvs();
       }
@@ -2376,7 +2385,8 @@ describe("gateway hot reload model state", () => {
   it.each(["rejected", "noop"] as const)(
     "keeps partial monitor writes aligned with accepted config through a %s successor",
     async (successor) => {
-      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const clock = createGatewaySchedulerClock(Date.now());
+      const scheduler = createTestGatewayScheduler(clock.clock);
       const fixtureDir = autoCleanupTempDirs.make("openclaw-monitor-publication-");
       const initialConfig = {
         agents: {
@@ -2401,6 +2411,7 @@ describe("gateway hot reload model state", () => {
       const { buildGatewayCronService } =
         await vi.importActual<typeof import("./server-cron.js")>("./server-cron.js");
       const cronState = buildGatewayCronService({
+        scheduler,
         cfg: initialConfig,
         deps: {} as never,
         env: { ...process.env, OPENCLAW_STATE_DIR: fixtureDir, OPENCLAW_SKIP_CRON: "0" },
@@ -2494,24 +2505,18 @@ describe("gateway hot reload model state", () => {
             ),
           ).resolves.toBe("applied");
         }
-        await vi.advanceTimersByTimeAsync(30_000);
-        // The retry spans real event-loop turns; keep fake time fixed so this
-        // observes that retry's result without starting another retry.
-        await waitForFast(
-          async () => {
-            expect(await readIntervals()).toEqual([7_200_000, 7_200_000]);
-            expect(
-              (await loadCronJobsStore(cronState.storePath)).jobs
-                .filter((job) => skillCollectionReviewMonitorAgentId(job) !== undefined)
-                .map((job) => job.enabled),
-            ).toEqual([false, false]);
-          },
-          { interval: 0 },
-        );
+        await clock.advanceBy(30_000);
+        expect(await readIntervals()).toEqual([7_200_000, 7_200_000]);
+        expect(
+          (await loadCronJobsStore(cronState.storePath)).jobs
+            .filter((job) => skillCollectionReviewMonitorAgentId(job) !== undefined)
+            .map((job) => job.enabled),
+        ).toEqual([false, false]);
       } finally {
         db.exec("DROP TRIGGER IF EXISTS monitor_publication_failure");
         handlers.stopRestartRetries();
         cronState.cron.stop();
+        await scheduler.stop();
       }
     },
   );

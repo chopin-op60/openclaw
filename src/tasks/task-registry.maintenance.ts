@@ -83,7 +83,7 @@ import {
   TASK_MAINTENANCE_BATCH_SIZE,
   visitTaskRegistryMaintenanceTasks,
 } from "./task-registry-maintenance-snapshot.js";
-import { prepareTaskRegistryRead } from "./task-registry-read.js";
+import { createTaskRegistryMaintenanceReadPreparation } from "./task-registry-read.js";
 import { withTaskRegistryMutation } from "./task-registry-state.js";
 import {
   configureTaskAuditTaskProvider,
@@ -775,11 +775,11 @@ export async function runTaskRegistryMaintenance(): Promise<TaskRegistryMaintena
   try {
     const { read, deferred } = await visitTaskRegistryMaintenanceTasks(
       {
-        prepareTaskRegistryRead,
+        prepareTaskRegistryRead: createTaskRegistryMaintenanceReadPreparation(),
         getTaskRegistryMaintenanceSnapshot,
         getTaskRegistryMaintenanceTask,
       },
-      async (selected, now, cronHistoryOverflowTaskIds, assertOwnerCurrent) => {
+      async (selected, now, cronHistoryOverflowSelections, assertOwnerCurrent) => {
         let current = selected;
         const cronOptions = (markLost: boolean) => ({
           markLost,
@@ -876,13 +876,13 @@ export async function runTaskRegistryMaintenance(): Promise<TaskRegistryMaintena
           assertOwnerCurrent();
         }
         if (
-          shouldPruneTerminalTask(current, now, cronHistoryOverflowTaskIds) ||
+          shouldPruneTerminalTask(current, now, cronHistoryOverflowSelections) ||
           shouldStampCleanupAfter(current)
         ) {
           const result = await applyTaskRegistryMaintenanceRetention(
             current,
             now,
-            cronHistoryOverflowTaskIds,
+            cronHistoryOverflowSelections,
             assertOwnerCurrent,
           );
           if (result === "pruned") {
