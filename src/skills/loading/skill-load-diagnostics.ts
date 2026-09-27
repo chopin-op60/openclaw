@@ -40,7 +40,10 @@ export function createSkillLoadDiagnostics() {
       omitted += snapshot.omitted + snapshot.items.length - count;
     },
     snapshot(): SkillLoadDiagnostics {
-      return { items: items.map((item) => ({ ...item })), omitted };
+      return {
+        items: items.map((item) => ({ kind: item.kind, path: item.path, message: item.message })),
+        omitted,
+      };
     },
   };
 }
