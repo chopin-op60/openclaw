@@ -27,9 +27,11 @@ export function assertExpectedLeafActive(
   // fences exact and ancestor matches; omission remains legacy exact-only compatibility.
   const matchesRequestedSession =
     requestedSessionId === undefined || requestedSessionId === session.entry?.sessionId;
+  // An empty starting point can advance too, but only within the pinned physical session.
   const matchesActivePath =
     activePathRelation === "exact" ||
-    (activePathRelation === "ancestor" && requestedSessionId !== undefined);
+    (requestedSessionId !== undefined &&
+      (activePathRelation === "ancestor" || expectedLeafEntryId === null));
   if (!matchesRequestedSession || !matchesActivePath) {
     throw new Error(ACTIVE_LEAF_CHANGED_ERROR_REASON);
   }
