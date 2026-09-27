@@ -15,6 +15,7 @@ import {
   type SkillStatusEntry,
   type SkillStatusReport,
 } from "../skills/discovery/status.js";
+import type { SkillLoadDiagnostics } from "../skills/loading/skill-load-diagnostics.js";
 import { shortenHomePath } from "../utils.js";
 import { formatCliCommand } from "./command-format.js";
 import { formatCliJsonFailure } from "./failure-output.js";
@@ -38,9 +39,25 @@ export type SkillsCheckOptions = {
   agent?: string;
 };
 
-function appendClawHubHint(output: string): string {
+function appendSkillDiagnostics(output: string, diagnostics?: SkillLoadDiagnostics): string {
+  if (!diagnostics || (diagnostics.items.length === 0 && diagnostics.omitted === 0)) {
+    return output;
+  }
+  const lines = [output, "", theme.warn("Skill load warnings:")];
+  for (const diagnostic of diagnostics.items) {
+    const file = sanitizeJsonString(sanitizeForLog(shortenHomePath(diagnostic.path)));
+    const message = sanitizeJsonString(sanitizeForLog(diagnostic.message));
+    lines.push(`  ${file}: ${message}`);
+  }
+  if (diagnostics.omitted > 0) {
+    lines.push(`  ${diagnostics.omitted} additional skill warnings omitted.`);
+  }
+  return lines.join("\n");
+}
+
+function appendClawHubHint(output: string, diagnostics?: SkillLoadDiagnostics): string {
   const command = formatCliCommand("openclaw skills");
-  return `${output}\n\nTip: use \`${command} search\`, \`${command} install\`, and \`${command} update\` for ClawHub-backed skills.`;
+  return `${appendSkillDiagnostics(output, diagnostics)}\n\nTip: use \`${command} search\`, \`${command} install\`, and \`${command} update\` for ClawHub-backed skills.`;
 }
 
 function formatSkillStatus(skill: SkillStatusEntry, detailed = false): string {
@@ -137,6 +154,7 @@ export function formatSkillsList(report: SkillStatusReport, opts: SkillsListOpti
 
   if (opts.json) {
     return formatSkillsJson({
+      ...(report.diagnostics ? { diagnostics: report.diagnostics } : {}),
       workspaceDir: report.workspaceDir,
       managedSkillsDir: report.managedSkillsDir,
       skills: skills.map((s) => ({
@@ -163,7 +181,7 @@ export function formatSkillsList(report: SkillStatusReport, opts: SkillsListOpti
     const message = opts.eligible
       ? `No eligible skills found. Run \`${formatCliCommand("openclaw skills list")}\` to see all skills.`
       : "No skills found.";
-    return appendClawHubHint(message);
+    return appendClawHubHint(message, report.diagnostics);
   }
 
   const ready = skills.filter(isReadyForAgent);
@@ -198,7 +216,7 @@ export function formatSkillsList(report: SkillStatusReport, opts: SkillsListOpti
     }).trimEnd(),
   );
 
-  return appendClawHubHint(lines.join("\n"));
+  return appendClawHubHint(lines.join("\n"), report.diagnostics);
 }
 
 /** Render one skill's status, requirements, install hints, and API-key setup details. */
@@ -215,16 +233,21 @@ export function formatSkillInfo(
       return formatSkillsJson({
         ...formatCliJsonFailure(`Skill "${requestedName}" not found.`),
         skill: requestedName,
+        ...(report.diagnostics ? { diagnostics: report.diagnostics } : {}),
       });
     }
     const safeRequestedName = sanitizeJsonString(sanitizeForLog(requestedName));
     return appendClawHubHint(
       `Skill "${safeRequestedName}" not found. Run \`${formatCliCommand("openclaw skills list")}\` to see available skills.`,
+      report.diagnostics,
     );
   }
 
   if (opts.json) {
-    return formatSkillsJson(skill);
+    return formatSkillsJson({
+      ...skill,
+      ...(report.diagnostics ? { diagnostics: report.diagnostics } : {}),
+    });
   }
 
   const lines: string[] = [];
@@ -316,7 +339,7 @@ export function formatSkillInfo(
     );
   }
 
-  return appendClawHubHint(lines.join("\n"));
+  return appendClawHubHint(lines.join("\n"), report.diagnostics);
 }
 
 /** Render aggregate setup health for all discovered skills. */
@@ -338,6 +361,7 @@ export function formatSkillsCheck(report: SkillStatusReport, opts: SkillsCheckOp
     return formatSkillsJson({
       agentId,
       agentSkillFilter: report.agentSkillFilter,
+      ...(report.diagnostics ? { diagnostics: report.diagnostics } : {}),
       workspaceDir: report.workspaceDir,
       managedSkillsDir: report.managedSkillsDir,
       summary: {
@@ -437,7 +461,7 @@ export function formatSkillsCheck(report: SkillStatusReport, opts: SkillsCheckOp
     ...formatSkillCheckSection("Missing requirements:", missingReqs, formatSkillMissingSummary),
   );
 
-  return appendClawHubHint(lines.join("\n"));
+  return appendClawHubHint(lines.join("\n"), report.diagnostics);
 }
 
 export function formatSkillCuratorStatus(status: SkillsCuratorCompatibleStatusResult): string {
@@ -484,5 +508,5 @@ export function formatSkillCuratorStatus(status: SkillsCuratorCompatibleStatusRe
   for (const overlap of status.overlaps) {
     lines.push(`Legacy overlap: ${overlap.left} ~ ${overlap.right}`);
   }
-  return `${lines.join("\n")}\n`;
+  return `${appendSkillDiagnostics(lines.join("\n"), status.diagnostics)}\n`;
 }

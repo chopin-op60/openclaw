@@ -10,6 +10,7 @@ import {
   type LocalSkillLoadDiagnostic,
 } from "./local-loader.js";
 import type { PluginSkillRoot } from "./plugin-skill-root.js";
+import type { createSkillLoadDiagnostics } from "./skill-load-diagnostics.js";
 import { compactSkillPath } from "./skill-paths.js";
 import {
   canonicalSkillDirForSource,
@@ -48,6 +49,7 @@ function loadContainedSkillRecord(params: {
   canonicalSkillDir?: string;
   rejectHardlinks: boolean;
   onDiagnostic?: (diagnostic: LocalSkillLoadDiagnostic) => void;
+  diagnostics?: ReturnType<typeof createSkillLoadDiagnostics>;
 }): LoadedSkillRecord | null {
   const loaded = loadSingleSkillDirectory({
     skillDir: params.skillDir,
@@ -55,8 +57,14 @@ function loadContainedSkillRecord(params: {
     source: params.source,
     maxBytes: params.maxSkillFileBytes,
     rejectHardlinks: params.rejectHardlinks,
-    onDiagnostic:
-      params.onDiagnostic ?? ((diagnostic) => warnInvalidSkill(params.source, diagnostic)),
+    onDiagnostic: (diagnostic) => {
+      params.diagnostics?.add(diagnostic);
+      if (params.onDiagnostic) {
+        params.onDiagnostic(diagnostic);
+      } else {
+        warnInvalidSkill(params.source, diagnostic);
+      }
+    },
   });
   if (!loaded) {
     return null;
@@ -104,6 +112,7 @@ export function loadSkillRootRecords(params: {
   rejectHardlinks?: boolean;
   mode?: "audit";
   onDiagnostic?: (diagnostic: LocalSkillLoadDiagnostic) => void;
+  diagnostics?: ReturnType<typeof createSkillLoadDiagnostics>;
 }): LoadedSkillRecord[] {
   const discoveryRoot = {
     path: path.resolve(params.dir),
@@ -141,7 +150,12 @@ export function loadSkillRootRecords(params: {
     source: params.source,
     limits,
     allowedSymlinkTargetRealPaths: resolveAllowedSkillSymlinkTargetRealPaths(params.config),
-    onDiagnostic: params.onDiagnostic,
+    onDiagnostic: params.diagnostics
+      ? (diagnostic) => {
+          params.diagnostics?.add(diagnostic);
+          params.onDiagnostic?.(diagnostic);
+        }
+      : params.onDiagnostic,
   });
   const maxSkillsLoadedPerSource = Math.max(0, limits.maxSkillsLoadedPerSource);
   const loadCandidate = (candidate: CandidateSkillDir) => {
@@ -156,6 +170,7 @@ export function loadSkillRootRecords(params: {
           : canonicalSkillDirForSource(params.source, candidate.skillDirRealPath),
       rejectHardlinks,
       onDiagnostic: params.onDiagnostic,
+      diagnostics: params.diagnostics,
     });
     if (record) {
       record.skill.discoveryRoot = discoveryRoot;
@@ -191,6 +206,7 @@ export function loadGeneratedPluginSkillRecords(params: {
   pluginSkillRoots: readonly PluginSkillRoot[];
   source: string;
   limits: ResolvedSkillDiscoveryLimits;
+  diagnostics?: ReturnType<typeof createSkillLoadDiagnostics>;
 }): LoadedSkillRecord[] {
   const candidates = discoverPluginSkills(params);
   const maxSkillsLoadedPerSource = Math.max(0, params.limits.maxSkillsLoadedPerSource);
@@ -202,6 +218,7 @@ export function loadGeneratedPluginSkillRecords(params: {
       source: params.source,
       maxSkillFileBytes: params.limits.maxSkillFileBytes,
       rejectHardlinks: candidate.rejectHardlinks,
+      diagnostics: params.diagnostics,
     });
     if (record) {
       record.skill.discoveryRoot = { path: path.resolve(params.pluginSkillsDir), worktree: false };

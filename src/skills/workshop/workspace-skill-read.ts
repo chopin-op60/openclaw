@@ -7,6 +7,7 @@ import {
   readWorkspaceSkillFile,
 } from "../lifecycle/workspace-skill-write.js";
 import { resolveSkillManifestMetadata } from "../loading/frontmatter.js";
+import type { LocalSkillLoadDiagnostic } from "../loading/local-loader.js";
 import type { Skill } from "../loading/skill-contract.js";
 import { loadSkillRootRecords, warnInvalidSkill } from "../loading/skill-root-loader.js";
 import { resolveWorkshopSkillsDir } from "./skills-root.js";
@@ -35,6 +36,7 @@ export type WorkshopSkillReadOptions = {
   config: OpenClawConfig;
   agentId?: string;
   env?: NodeJS.ProcessEnv;
+  onDiagnostic?: (diagnostic: LocalSkillLoadDiagnostic) => void;
 };
 
 function workshopSkillsDir(options: WorkshopSkillReadOptions): string {
@@ -54,6 +56,7 @@ export function listWritableWorkshopSkillSummaries(
     source: "openclaw-workshop",
     config: options.config,
     onDiagnostic: (diagnostic) => {
+      options.onDiagnostic?.(diagnostic);
       warnInvalidSkill("openclaw-workshop", diagnostic);
       // A failed read is not an empty collection. Keep intentional loader
       // exclusions, but never use an unreadable inventory for review or display.
