@@ -76,7 +76,7 @@ it.each(["by-id", "count"] as const)(
         state.statePath("broadcast.sqlite"),
       );
       const snapshot = vi.spyOn(projection, "withCurrentProjectionSnapshot");
-      const hostSql = observeHostDataSql(state.env);
+      const hostSql = observeHostDataSql();
       const diagnostics = channel("openclaw.worker.task");
       const tasks: unknown[] = [];
       const record = (value: unknown) => {
