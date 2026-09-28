@@ -108,8 +108,6 @@ export const SKIPPED_UPDATE_OUTCOMES: Readonly<Record<string, "pending" | "noop"
   "still-starting": "noop",
   "managed-service-handoff-already-running": "noop",
   "managed-service-handoff-cancelled": "noop",
-  "restart-disabled": "noop",
-  "restart-unavailable": "noop",
   "container-image-install": "noop",
   "unmanaged-package-install": "noop",
   "package-update-requires-cli": "noop",
