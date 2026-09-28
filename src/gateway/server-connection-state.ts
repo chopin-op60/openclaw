@@ -167,6 +167,7 @@ export function createGatewayConnectionState(params: {
       const encodedRows = new WeakMap<object, string>();
       const preparedAncestors = new WeakMap<object, ReturnType<typeof prepareSessionAncestor>>();
       const ancestors = projection.ancestorRows(record);
+      const enrichment = { includeDerivedTitles: true, includeLastMessage: true };
       let projectedAgentRuns = projection.state.rowContext.projectedAgentRuns;
       let registrations: (readonly [string, ChatAbortControllerEntry])[] = [];
       let projectRun: ReturnType<typeof createVisibleActiveSessionRunProjector> | undefined;
@@ -202,8 +203,7 @@ export function createGatewayConnectionState(params: {
           );
         }
         const presentation = presentRecipient(client, projectRun);
-        const enrichment = { includeDerivedTitles: true, includeLastMessage: true };
-        const { row } = presentation.snapshot(query, enrichment);
+        const row = presentation.present(record, enrichment);
         if (!row) {
           return undefined;
         }
@@ -265,7 +265,14 @@ export function createGatewayConnectionState(params: {
           },
           delivered: () => {
             references.forget(row.key);
-            ancestorDelivery?.delivered();
+            if (event === "sessions.changed" && source.reason === "activity-summary") {
+              // Rosters skip recaps, so a full recap row cannot certify a later reference.
+              for (const ancestor of ancestorDelivery?.ancestorSessions ?? []) {
+                references.forget(ancestor.key);
+              }
+            } else {
+              ancestorDelivery?.delivered();
+            }
           },
         };
       };
@@ -323,6 +330,7 @@ export function createGatewayConnectionState(params: {
       };
     },
     clients,
+    forgetConnectionAncestors,
     connectionWork: new GatewayConnectionWork(),
     mentionInbox,
     isConnectionActive,
