@@ -7,7 +7,6 @@ import { makeProviderModelFixture } from "../agents/test-helpers/provider-model-
 import { getRuntimeConfig } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { deleteTestEnvValue, setTestEnvValue } from "../test-utils/env.js";
-import { acquireTestPortBlock, type TestPortClaim } from "../test-utils/port-claims.js";
 import {
   createGatewayConfigPath,
   removeGatewayTempHome,
@@ -22,15 +21,11 @@ it.each(["native", "custom"] as const)(
     resetGatewayTestState();
     const home = await setupGatewayTempHome({ prefix: "openclaw-auto-list-proof-" });
     let gateway: Awaited<ReturnType<typeof startGatewayWithClient>> | undefined;
-    let pendingPortClaim: TestPortClaim | undefined;
     await runQaGatewayFixture(
       async () => {
         setTestEnvValue("OPENCLAW_BUNDLED_PLUGINS_DIR", path.resolve("extensions"));
         deleteTestEnvValue("OPENCLAW_DISABLE_BUNDLED_PLUGINS");
         const token = randomUUID();
-        const configPath = await createGatewayConfigPath(home.tempHome);
-        const portClaim = await acquireTestPortBlock({ offsets: [0, 1, 2, 3, 4] });
-        pendingPortClaim = portClaim;
         setTestEnvValue("OPENCLAW_GATEWAY_TOKEN", token);
         const baseUrl = endpoint === "native" ? "https://api.x.ai/v1" : "https://custom.invalid/v1";
         const cfg: OpenClawConfig = {
@@ -64,16 +59,13 @@ it.each(["native", "custom"] as const)(
             },
           },
           plugins: { allow: ["xai"], entries: { xai: { enabled: true } } },
-          gateway: { port: portClaim.port, auth: { mode: "token", token } },
+          gateway: { auth: { mode: "token", token } },
           hooks: { enabled: false },
         };
-        // The existing startup helper owns the claim once this call begins.
-        pendingPortClaim = undefined;
         gateway = await startGatewayWithClient({
           cfg,
-          portClaim,
           token,
-          configPath,
+          configPath: await createGatewayConfigPath(home.tempHome),
         });
         await gateway.server.startupSettled;
         const owner = getPublishedPreparedModelCatalogOwnerSnapshot({
@@ -117,7 +109,6 @@ it.each(["native", "custom"] as const)(
       },
       () => gateway && disconnectGatewayClient(gateway.client),
       () => gateway?.server.close({ reason: "auto model-list proof complete" }),
-      () => pendingPortClaim?.release(),
       () => removeGatewayTempHome(home.tempHome),
       () => home.envSnapshot.restore(),
       resetGatewayTestState,
