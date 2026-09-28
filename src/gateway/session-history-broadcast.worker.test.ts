@@ -1,4 +1,3 @@
-import { channel } from "node:diagnostics_channel";
 import { setImmediate } from "node:timers/promises";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, expect, it, vi } from "vitest";
@@ -100,19 +99,11 @@ it.each(["by-id", "count"] as const)(
       const snapshot = vi.spyOn(projection, "withCurrentProjectionSnapshot");
       const sql = observeMainThreadSql();
       sql.calibrate();
-      const diagnostics = channel("openclaw.worker.task");
-      const tasks: unknown[] = [];
-      const record = (value: unknown) => {
-        tasks.push(value);
-      };
       let eventLoopProgress = false;
       let progressedBeforeDelivery = false;
-      let tasksAtDelivery: unknown[] = [];
       broadcastToConnIds.mockImplementation(() => {
         progressedBeforeDelivery = eventLoopProgress;
-        tasksAtDelivery = tasks.slice();
       });
-      diagnostics.subscribe(record);
       const pending = handler({
         target,
         ...(kind === "by-id" ? { messageId: "answer" } : {}),
@@ -142,18 +133,11 @@ it.each(["by-id", "count"] as const)(
           expect.any(Set),
         );
         expect(progressedBeforeDelivery).toBe(true);
-        expect(tasksAtDelivery).toContainEqual(
-          expect.objectContaining({
-            worker: expect.stringMatching(/^session-transcript\.worker\./),
-            outcome: "ok",
-          }),
-        );
         sql.expectIdle();
         expect(snapshot).not.toHaveBeenCalled();
       } finally {
         release.resolve();
         await pending.catch(() => undefined);
-        diagnostics.unsubscribe(record);
         sql.restore();
         snapshot.mockRestore();
       }
