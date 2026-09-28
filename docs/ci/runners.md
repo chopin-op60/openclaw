@@ -39,7 +39,7 @@ Healthy eligible main pushes and Windows-selected PRs can additionally offload f
 
 Native Swift builds/tests, iOS build phases, screenshot shards, and Periphery scans use Xcode 27 on GitHub-hosted `xcode-27`, the preview macOS 27 image. This toolchain change preserves hosted placement, job counts, worker caps, coverage, and deadlines; it adds no Blacksmith registrations. The Swift source-language minimum remains 6.3. Native compatibility and complete job timings require proof on the new image.
 
-The reusable iOS release qualification job uses `xcode-27-xlarge` on the same preview image to give its Simulator and isolated Gateway more CPU and memory. Stock qualification keeps the simulator unmodified. Its two fresh test fixtures, assertions, deadlines, and job count remain unchanged.
+The reusable iOS release qualification job uses `xcode-27-xlarge` on the same preview image to give its Simulator and isolated Gateway more CPU and memory. Stock qualification keeps the simulator unmodified. After the native build, each arm starts one isolated Gateway and prepares its setup handler through `device.pair.setupStatus` before booting a fresh simulator. The status call prunes expired completion records without issuing a credential; the setup code consumed by the app is issued after boot. The same Gateway serves the live pairing, chat, and relaunch case, then stops before the independent transcript-reader case on the same simulator. Both cases must pass within their individual deadlines.
 
 The earlier hosted-routing validation used `macos-26`: repeated first attempts left the Blacksmith macOS jobs unassigned while other CI completed. In [run 33616182173](https://github.com/openclaw/openclaw/actions/runs/33616182173), the hosted retry assigned all three waiting Mac jobs within eight seconds; the Debug/simulator job passed in 15m31s. That historical result predates Xcode 27. Complete native evidence remains required for full manual qualification.
 
@@ -56,6 +56,11 @@ Actions includes that path in cache compatibility. Pnpm's side-effects cache
 carries native postinstall outputs such as Matrix crypto's binary and version
 marker, so a compatible warm install skips the download. Cold caches and changed
 native build inputs still require the upstream asset.
+Linux setup uses hard links when that store is private to the job's workspace,
+including store-only restores on hosted runners. This avoids copying cached
+packages on filesystems without clone support. Shared or external stores and
+ordinary macOS installs retain their configured import method; frozen-lockfile
+reconciliation and lifecycle scripts still run.
 Setup restores the configured store root before activating pnpm. The same
 artifact contains the pinned pnpm wrapper and Linux native executable archives
 under `toolchain/`, keyed by the complete `packageManager` pin. Bootstrap checks

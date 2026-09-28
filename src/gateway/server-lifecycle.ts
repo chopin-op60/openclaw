@@ -134,7 +134,7 @@ export async function prepareGatewayLifecycle(params: {
       void nodeDesktopServiceRef.current?.stopNode(nodeId);
     },
   });
-  const { nodeRegistry, nodePresenceTimers, nodeSendToSession, nodeUnsubscribeAll } = nodeRuntime;
+  const { nodeRegistry, nodeSendToSession, nodeUnsubscribeAll } = nodeRuntime;
   const nodeDesktopService = (await import("./desktop/node-source.js")).createNodeDesktopService({
     getConfig: getRuntimeConfig,
     nodeRegistry,
@@ -430,13 +430,6 @@ export async function prepareGatewayLifecycle(params: {
     watchNodeHttpRuntime.close();
     await shutdownRuntime.runGatewayClosePrelude({
       stopDiagnostics: stopGatewayDiagnosticHeartbeat,
-      clearSkillsRefreshTimer: () => {
-        if (!runtimeState?.skillsRefreshTimer) {
-          return;
-        }
-        clearTimeout(runtimeState.skillsRefreshTimer);
-        runtimeState.skillsRefreshTimer = null;
-      },
       skillsChangeUnsub: runtimeState.skillsChangeUnsub,
       disposeAuthRateLimiter: () => {
         authRateLimiter.dispose();
@@ -562,7 +555,6 @@ export async function prepareGatewayLifecycle(params: {
               cron: runtimeState.cronState.cron,
               stopCronMaintenance: shutdownRuntime.stopCronMaintenance,
               heartbeatRunner: runtimeState.heartbeatRunner,
-              nodePresenceTimers,
               maintenance: runtimeState.maintenance,
               stopMediaCleanup: stopMediaCleanupForClose,
               agentUnsub: runtimeState.agentUnsub,
