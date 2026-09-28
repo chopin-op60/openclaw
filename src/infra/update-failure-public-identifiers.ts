@@ -91,6 +91,7 @@ const PUBLIC_CODES = new Set<string>([
   "doctor-failed",
   "agent-database-lease-active",
   "global-install-failed",
+  "unexpected-error",
   ...UPDATE_ENVIRONMENT_FAILURE_REASONS,
   "swap-failed",
   "baseline-scan-failed",

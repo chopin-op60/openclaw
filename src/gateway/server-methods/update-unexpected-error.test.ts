@@ -1,13 +1,17 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it, vi } from "vitest";
+import { resolveStateDir } from "../../config/paths.js";
 import { prepareUpdateFailureReport } from "../../infra/update-failure-report-prepare.js";
 import { getUpdateRun } from "../../infra/update-run-ledger.js";
 import type { UpdateRunResult } from "../../infra/update-runner-types.js";
 import {
   adoptUpdateCampaignMock,
   cancelManagedServiceUpdateHandoffMock,
+  detectRespawnSupervisorMock,
   invokeUpdateRun,
+  mockGlobalInstallSurface,
   resolveUpdateInstallSurfaceMock,
   resolveStartupInstallStatusMock,
   scheduleGatewayRestartMock,
@@ -17,6 +21,68 @@ import {
 } from "./update.test-harness.js";
 
 describe("update.run unexpected-error diagnostics", () => {
+  it("labels an accepted handoff as pending instead of completed", async () => {
+    mockGlobalInstallSurface();
+    detectRespawnSupervisorMock.mockReturnValueOnce("launchd");
+    const logGateway = { warn: vi.fn(), info: vi.fn() };
+    let payload: { runId: string; result: UpdateRunResult } | undefined;
+    await invokeUpdateRun(
+      {},
+      (_ok, response) => {
+        payload = response as typeof payload;
+      },
+      undefined,
+      { logGateway },
+    );
+    const response = expectDefined(payload, "update response");
+    expect(response.result).toMatchObject({
+      status: "skipped",
+      reason: "managed-service-handoff-started",
+    });
+    expect(logGateway.info).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `update.run handoff started runId=${response.runId} status=pending reason=managed-service-handoff-started`,
+      ),
+    );
+    expect(logGateway.warn).not.toHaveBeenCalled();
+  });
+
+  it("logs a terminal failure and saves its private run report", async () => {
+    mockGlobalInstallSurface();
+    detectRespawnSupervisorMock.mockReturnValueOnce("launchd");
+    startManagedServiceUpdateHandoffMock.mockRejectedValueOnce(
+      new Error("synthetic helper launch failure"),
+    );
+    const logGateway = { warn: vi.fn(), info: vi.fn() };
+    let payload: { runId: string; result: UpdateRunResult } | undefined;
+    await invokeUpdateRun(
+      {},
+      (_ok, response) => {
+        payload = response as typeof payload;
+      },
+      undefined,
+      { logGateway },
+    );
+    const response = expectDefined(payload, "update response");
+    expect(response.result).toMatchObject({
+      status: "error",
+      reason: "managed-service-handoff-failed",
+    });
+    expect(logGateway.warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `update.run failed runId=${response.runId} status=failed reason=managed-service-handoff-failed`,
+      ),
+    );
+    expect(logGateway.info).not.toHaveBeenCalledWith(
+      expect.stringContaining("update.run completed"),
+    );
+    const report = await fs.readFile(
+      path.join(resolveStateDir(), "update-reports", `${response.runId}.md`),
+      "utf8",
+    );
+    expect(report).toContain("OpenClaw update failed: managed-service-handoff-failed");
+  });
+
   it("keeps the primary exception when optional history reads fail", async () => {
     const original = Object.assign(new TypeError("campaign admission failed"), { code: "EACCES" });
     adoptUpdateCampaignMock.mockImplementationOnce(() => {
@@ -276,8 +342,13 @@ describe("update.run unexpected-error diagnostics", () => {
         expect(JSON.stringify(recordedRun)).not.toContain(privateText);
         expect(report.body).not.toContain(privateText);
       }
-      expect(logGateway.warn).toHaveBeenCalledOnce();
+      expect(logGateway.warn).toHaveBeenCalledTimes(2);
       expect(logGateway.warn).toHaveBeenCalledWith(expect.stringContaining("EACCES"));
+      expect(logGateway.warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `update.run failed runId=${response.runId} status=failed reason=unexpected-error`,
+        ),
+      );
     },
   );
 });

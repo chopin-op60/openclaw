@@ -118,6 +118,13 @@ not prompt after rollback.
 
 Update completion prints the terminal outcome and a local Markdown report path before exiting, including unexpected failures. Failed runs keep rollback-facing diagnostic JSON within the released 8 KiB limit. That file links a separate artifact containing every individually bounded Doctor finding; the Markdown report also retains the complete inventory. JSON output includes `reportPath`; a report-write failure prints a warning and preserves the update outcome.
 
+Dashboard updates use the same durable run history. The Gateway logs an accepted
+managed-service handoff as pending because the updater has not finished. When the
+Gateway itself finishes a failed attempt, it logs a warning with the run ID and
+public reason code and saves a private report in `~/.openclaw/update-reports/`.
+For failures after a handoff, use `openclaw update status --json` to inspect the
+final outcome; the initial handoff log is not a completion receipt.
+
 After a final interactive update failure, **Diagnose update failure** and
 **Report update failure** are separate choices. Reporting first shows the exact
 sanitized issue body and defaults confirmation to **No**. After confirmation,

@@ -61,6 +61,7 @@ import { renderUpdateRunNotice } from "../../infra/update-run-report.js";
 import { resolveUnmanagedUpdateInstallReason } from "../../infra/update-runner-install-surface.js";
 import type { UpdateRunResult } from "../../infra/update-runner-types.js";
 import { getUpdateAvailable } from "../../infra/update-status-state.js";
+import { classifyUpdateOutcome } from "../../shared/update-outcome.js";
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
 import { mergeDeliveryContext } from "../../utils/delivery-context.shared.js";
 import {
@@ -83,6 +84,7 @@ import {
   recordHandoffFailure,
   resolveGatewayUpdateAdmission,
 } from "./update-admission.js";
+import { recordGatewayUpdateOutcome } from "./update-outcome-observation.js";
 import { updateReportHandler } from "./update-report.js";
 import { updateStatusHandlers } from "./update-status.js";
 
@@ -630,7 +632,7 @@ export const updateHandlers: GatewayRequestHandlers = {
     // refusals and synchronous failures have no later process to finish the run.
     if (handoff?.status !== "started") {
       outcomeRun = finishUpdateRun(runId, {
-        status: result.status === "skipped" ? "skipped" : "failed",
+        status: classifyUpdateOutcome(result) === "failed" ? "failed" : "skipped",
         reason: result.reason,
         after: result.after,
       });
@@ -702,9 +704,7 @@ export const updateHandlers: GatewayRequestHandlers = {
     if ((ackDelivered || ackQueued) && handoff?.status !== "started") {
       await notify(outcomeRun, "finished");
     }
-    context?.logGateway?.info(
-      `update.run completed ${formatControlPlaneActor(actor)} changedPaths=<n/a> restartReason=update.run status=${result.status}`,
-    );
+    await recordGatewayUpdateOutcome(result, outcomeRun, runId, actor, context?.logGateway);
     respond(
       true,
       {
