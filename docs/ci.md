@@ -12,6 +12,8 @@ CI continues during Full Release Validation; the legacy release-priority variabl
 does not pause workflow admission. See [deferred CI recovery](https://github.com/openclaw/openclaw/blob/main/.agents/skills/release-openclaw-ci/SKILL.md#deferred-ci-recovery)
 for runs already deferred by older workflow revisions.
 
+Native video smoke coverage uses four shards of four providers. Each provider has a ten-minute operation timeout plus 30 seconds of test overhead; each shard has a 50-minute job budget, leaving eight minutes for setup. These shards keep full-mode video testing disabled.
+
 Broad PRs retain their compact selected-owner Node plan when time-based splitting
 would exceed the 130-row matrix cap. See [Node test lanes](/ci/scope-and-routing/node-test-lanes).
 
@@ -46,7 +48,7 @@ file, so large PRs do not lose test-planning inputs to Actions output or environ
 size limits. Frozen targets that predate this transport retain their bounded JSON
 output contract. Missing or invalid inputs still reject current PR Node planning.
 
-The [Testbox check workflow](/ci/local-proof#testbox-validation) defaults to a four-hour outer job budget for delegated full-suite proof. Individual test deadlines remain unchanged.
+The [Testbox check workflow](/ci/local-proof#testbox-validation) requests the Blacksmith 32-class for dispatched proof and defaults to a four-hour outer job budget. PR hydration checks stay on hosted Ubuntu; individual test deadlines remain unchanged.
 
 Full GitHub and hybrid type checks run the five core stripes independently, retaining two compiler children per job. Current hybrid full runs use three hosted extension-lint jobs; targeted layouts retain six stripe identities. Trusted hybrid first attempts place the heavy first packed core-lint row on the Blacksmith 16-class, the second on the 8-class, and the final gate on the 4-class to avoid serial hosted assignment delays. Frozen targets keep their earlier layout; see [static checks](/ci/runners#runner-backend-modes).
 
