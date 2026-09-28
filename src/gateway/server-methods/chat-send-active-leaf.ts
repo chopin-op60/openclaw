@@ -8,6 +8,7 @@ export function assertExpectedLeafActive(
   agentId: string,
   expectedLeafEntryId: string | null,
   requestedSessionId: string | undefined,
+  options?: { allowEmptyAncestor?: boolean },
 ) {
   const activePathRelation = session.entry?.sessionId
     ? readSessionTranscriptActivePathEntryRelation(
@@ -27,11 +28,13 @@ export function assertExpectedLeafActive(
   // fences exact and ancestor matches; omission remains legacy exact-only compatibility.
   const matchesRequestedSession =
     requestedSessionId === undefined || requestedSessionId === session.entry?.sessionId;
-  // An empty starting point can advance too, but only within the pinned physical session.
+  // Only message admission treats a pinned empty root as an ancestor. Stop and
+  // recovery commit guards must retain their captured empty view across yields.
   const matchesActivePath =
     activePathRelation === "exact" ||
     (requestedSessionId !== undefined &&
-      (activePathRelation === "ancestor" || expectedLeafEntryId === null));
+      (activePathRelation === "ancestor" ||
+        (options?.allowEmptyAncestor === true && expectedLeafEntryId === null)));
   if (!matchesRequestedSession || !matchesActivePath) {
     throw new Error(ACTIVE_LEAF_CHANGED_ERROR_REASON);
   }
