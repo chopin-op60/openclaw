@@ -66,7 +66,11 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/github-user-identity.cache.test.ts",
   "src/gateway/github-user-identity.oidc.test.ts",
   "src/gateway/github-user-identity.test.ts",
+  "src/gateway/health/collector.channel-discovery.test.ts",
+  "src/gateway/health/collector.deadline.test.ts",
+  "src/gateway/health/collector.legacy-owner.test.ts",
   "src/gateway/health/collector.queue-health.test.ts",
+  "src/gateway/health/collector.session-store-path.test.ts",
   "src/gateway/http-auth-utils.paired-device.test.ts",
   "src/gateway/http-auth-utils.test.ts",
   "src/gateway/internal-source-reply-persistence.test.ts",
@@ -109,6 +113,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/server-methods/cron.list-scoped.test.ts",
   "src/gateway/server-methods/cron.runs.test.ts",
   "src/gateway/server-methods/cron.scheduled-policy-adoption.integration.test.ts",
+  "src/gateway/server-methods/cron.scratch-read.test.ts",
   "src/gateway/server-methods/cron.self-removal.test.ts",
   "src/gateway/server-methods/cron.validation.test.ts",
   "src/gateway/server-methods/models-auth-api-key.integration.test.ts",
@@ -451,6 +456,8 @@ export const gatewayMethodsTestExclude = [
 
 // Gateway server tests that need a private module graph and the plain Vitest runner.
 export const gatewayServerIsolatedTestFiles = [
+  // Native source captures must not retain this fixture's forbidden process constructors.
+  "src/gateway/server-startup-post-attach.test.ts",
   "src/gateway/server.agent-artifact-apis.test.ts",
   "src/gateway/server-worker-environment-startup.state.test.ts",
   // A failed native close permanently fences this process's metadata owner.
