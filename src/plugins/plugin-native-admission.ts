@@ -223,10 +223,10 @@ export function createPluginNativeAdmission(
     previous?: PluginNativeNamespaceFact,
     retainedRoot?: string,
   ) => {
-    const root = createPluginNativeCaptureRoot();
+    const root = createPluginNativeCaptureRoot(state.captureStateDir);
     state.roots.add(root);
     snapshotOwners.set(root, new Set([state]));
-    const { fact } = capturePluginNativeNamespace({
+    const { fact, changed } = capturePluginNativeNamespace({
       sourceDirectory,
       boundary,
       managed,
@@ -240,6 +240,46 @@ export function createPluginNativeAdmission(
         (file): file is string => Boolean(file),
       ),
     });
+    // Overlapping managed namespaces share inodes; a new hardlink changes earlier captures too.
+    for (const namespace of state.namespaces.values()) {
+      for (const [relative, member] of Object.entries(namespace.members)) {
+        const identity = changed.get(member.source);
+        const sourceChanged =
+          identity !== undefined &&
+          pluginSourceIdentityChangedOnlyByCtime(member.sourceIdentity, identity);
+        const captureChanged =
+          identity !== undefined &&
+          pluginSourceIdentityChangedOnlyByCtime(member.capturedIdentity, identity);
+        if (!identity || (!sourceChanged && !captureChanged)) {
+          continue;
+        }
+        // Persisted receipts can outlive their captures; missing namespaces require fresh admission.
+        if (!fs.statSync(pluginNativeNamespaceDirectory(namespace), { throwIfNoEntry: false })) {
+          break;
+        }
+        if (namespace !== previous || !captureChanged) {
+          const capturedHash = hashPluginSourceFile(
+            pluginNativeNamespaceMemberPath(namespace, relative),
+            pluginNativeNamespaceBoundary(namespace),
+          ).contentHash;
+          if (
+            (member.contentHash && capturedHash !== member.contentHash) ||
+            (sourceChanged &&
+              hashPluginSourceFile(member.source, path.dirname(member.source)).contentHash !==
+                capturedHash)
+          ) {
+            throw new Error("Native plugin companion changed during admission");
+          }
+          member.contentHash ??= capturedHash;
+        }
+        if (sourceChanged) {
+          member.sourceIdentity = identity;
+        }
+        if (captureChanged) {
+          member.capturedIdentity = identity;
+        }
+      }
+    }
     state.namespaces.set(root.directory, fact);
     return fact;
   };
@@ -263,7 +303,7 @@ export function createPluginNativeAdmission(
     });
     const unchanged = isDeepStrictEqual(state.receipts.get(key), next);
     state.receipts.set(key, next);
-    if (!owner) {
+    if (!owner || state.artifactPreservingReadOnly) {
       return;
     }
     if (unchanged) {
@@ -273,6 +313,7 @@ export function createPluginNativeAdmission(
     const roots = [...state.roots].filter((root) => used.has(root.directory));
     const publication = () =>
       publishPluginSourceAdmission({
+        stateDir: state.publicationStateDir,
         pluginId: owner.pluginId,
         rootDir: owner.rootDir,
         installRecordHash: owner.installRecordHash,
@@ -587,7 +628,7 @@ export function createPluginNativeAdmission(
         },
       };
     },
-    finish(_captureDirectory: string, receipt: NativeReceipt) {
+    finish(receipt: NativeReceipt) {
       if (!files.size) {
         return;
       }

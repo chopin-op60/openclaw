@@ -80,7 +80,7 @@ export function createGatewayAuthenticatedRequestDispatcher(params: {
   let deviceCredentialMutationBarrier: Promise<void> | undefined;
 
   const closeInvalidatedClient = (client: GatewayWsClient, method: string): boolean => {
-    const policyChanged = !isGatewayAuthPolicyCurrent(client.authPolicyGeneration);
+    const policyChanged = !isGatewayAuthPolicyCurrent(client.authPolicy);
     if (!client.invalidated && !policyChanged) {
       return false;
     }
@@ -133,9 +133,8 @@ export function createGatewayAuthenticatedRequestDispatcher(params: {
     );
     const sourceContext = context.resolveGatewayContext?.() ?? context;
     const isCommittedPolicyCurrent = () =>
-      client.authPolicyGeneration === undefined ||
       isGatewayAuthPolicyCurrent(
-        client.authPolicyGeneration,
+        client.authPolicy,
         sourceContext.getCommittedRuntimeConfig?.() ?? sourceContext.getRuntimeConfig(),
       );
     const clientAuthority = captureGatewayDeviceRevocation(
@@ -178,7 +177,7 @@ export function createGatewayAuthenticatedRequestDispatcher(params: {
             dependencies: {
               client,
               context: sourceContext,
-              authPolicyGeneration: client.authPolicyGeneration,
+              authPolicyGeneration: client.authPolicy?.generation,
               sharedGenerationOwner: client.usesSharedGatewayAuth ? generationState : undefined,
               sharedGeneration: client.usesSharedGatewayAuth
                 ? client.sharedGatewaySessionGeneration
@@ -425,6 +424,7 @@ export function createGatewayAuthenticatedRequestDispatcher(params: {
                 {
                   req,
                   respond: respondWithAuthority,
+                  acceptsSerializedJson: true,
                   client,
                   isWebchatConnect: params.isWebchatConnect,
                   hasCurrentClientAuthority,

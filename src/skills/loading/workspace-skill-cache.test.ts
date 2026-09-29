@@ -54,7 +54,7 @@ describe("workspace skill discovery cache", () => {
       bundledSkillsDir: "",
       pluginSkillsDir: path.join(workspaceDir, ".plugin-skills"),
     };
-    const directoryReads = vi.spyOn(fsSync, "readdirSync");
+    const directoryReads = vi.spyOn(fsSync, "opendirSync");
     const reads = (dir: string) =>
       directoryReads.mock.calls.filter(([file]) => String(file) === path.join(dir, "skills"))
         .length;

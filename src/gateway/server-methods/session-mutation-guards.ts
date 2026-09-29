@@ -167,7 +167,7 @@ export function bindWebSocketRequestMutationAuthority<T extends GatewayRequestOp
       options.hasCurrentClientAuthority !== hasCurrentClientAuthority ||
       options.sessionMutationCommitGuard !== undefined ||
       client.invalidated ||
-      !isGatewayAuthPolicyCurrent(client.authPolicyGeneration, getRuntimeConfigSnapshot()) ||
+      !isGatewayAuthPolicyCurrent(client.authPolicy, getRuntimeConfigSnapshot()) ||
       !hasCurrentDeviceRevocation() ||
       client.internal?.agentRuntimeIdentity
     ) {

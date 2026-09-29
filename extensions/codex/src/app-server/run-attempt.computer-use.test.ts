@@ -3,7 +3,6 @@ import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { describe, expect, it, vi } from "vitest";
 import { readAttemptTerminal } from "./attempt-terminal.test-helper.js";
 import * as elicitationBridge from "./elicitation-bridge.js";
-import { CodexNativeProcessAuthority } from "./native-process-authority.js";
 import type { v2 } from "./protocol.js";
 import {
   createStartedThreadHarness,
@@ -18,8 +17,6 @@ setupRunAttemptTestHooks();
 
 describe("runCodexAppServerAttempt", () => {
   it("routes Computer Use MCP elicitations through the native bridge and cancels the turn", async () => {
-    const cancelTurn = vi.spyOn(CodexNativeProcessAuthority.prototype, "cancelTurn");
-    const turnStarted = createDeferred<void>();
     const turnInterrupted = createDeferred<void>();
     const bridgeSpy = vi
       .spyOn(elicitationBridge, "routeCodexAppServerElicitationRequest")
@@ -35,9 +32,6 @@ describe("runCodexAppServerAttempt", () => {
       enabled: true,
     } satisfies v2.PluginInstalledResponse["marketplaces"][number]["plugins"][number];
     const request = async (method: string) => {
-      if (method === "turn/start") {
-        turnStarted.resolve();
-      }
       if (method === "turn/interrupt") {
         turnInterrupted.resolve();
       }
@@ -105,12 +99,7 @@ describe("runCodexAppServerAttempt", () => {
       },
     });
     // The keyed router only accepts turn-scoped requests once the turn is bound.
-    await Promise.race([
-      turnStarted.promise,
-      run.then((result) => {
-        throw new Error("Attempt settled before turn/start", { cause: result });
-      }),
-    ]);
+    await run.waitForTurnAccepted();
     const result = await elicitation.handleServerRequest({
       id: "request-elicitation-1",
       method: "mcpServer/elicitation/request",
@@ -149,7 +138,6 @@ describe("runCodexAppServerAttempt", () => {
     });
     expect(
       elicitation.requests.filter(({ method }) => method === "thread/backgroundTerminals/list"),
-    ).toEqual([]);
-    expect(cancelTurn).toHaveBeenCalledExactlyOnceWith(elicitation.client, "thread-1", "turn-1");
+    ).toEqual([{ method: "thread/backgroundTerminals/list", params: { threadId: "thread-1" } }]);
   });
 });

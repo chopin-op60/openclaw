@@ -13,11 +13,11 @@ import { detectTextDirection } from "../../../lib/text-direction.ts";
 import "../../../styles/chat/composer-context-strip.css";
 import type { ComposerDictationController } from "../composer-dictation.ts";
 import { insertComposerDictation } from "../composer-dictation.ts";
+import { renderChatAttachmentInputs } from "./chat-attachment-inputs.ts";
 import {
   handleChatAttachmentPaste,
   renderAttachmentPreview,
   renderAttachmentReadStatus,
-  renderChatAttachmentInputs,
 } from "./chat-attachments.ts";
 import type { ChatRunControlsProps } from "./chat-composer-controls.ts";
 import {
@@ -99,6 +99,36 @@ type ChatComposerViewContext = {
   slashMenuAnnouncementId: string;
   goalComposer: GoalComposerController;
 };
+
+export function renderChatComposerQueue(props: ChatComposerProps, showAbortableUi: boolean) {
+  return renderChatQueue({
+    queue: props.queue,
+    displayQueue: props.displayQueue,
+    offline: props.offline,
+    canAbort: showAbortableUi,
+    canRemoveServerQueued: props.connected && props.canSend && !props.submitDisabledReason,
+    onQueueRetry:
+      props.connected && props.canSend && !props.submitDisabledReason
+        ? props.onQueueRetry
+        : undefined,
+    onQueueSteer:
+      props.connected && props.canSend && !props.submitDisabledReason
+        ? props.onQueueSteer
+        : undefined,
+    // Reordering is local bookkeeping, so it stays available while offline —
+    // exactly when a queue is long enough to need it.
+    onQueueMove: props.onQueueMove,
+    onQueueEdit: props.queuedEdit?.onEdit,
+    onQueueEditChange: props.queuedEdit?.onEditChange,
+    onQueueEditSubmit: props.queuedEdit?.onEditSubmit,
+    onQueueEditCancel: props.queuedEdit?.onCancel,
+    editingId: props.queuedEdit?.editingId ?? null,
+    editingText: props.queuedEdit?.editingText,
+    editingMentions: props.queuedEdit?.editingMentions,
+    editingSource: props.queuedEdit?.source,
+    onQueueRemove: props.onQueueRemove,
+  });
+}
 
 export function renderChatComposerView(context: ChatComposerViewContext) {
   const {
@@ -315,37 +345,16 @@ export function renderChatComposerView(context: ChatComposerViewContext) {
           aria-hidden="true"
         ></div>`
       : nothing;
-  const queue = renderChatQueue({
-    queue: props.queue,
-    displayQueue: props.displayQueue,
-    offline: props.offline,
-    canAbort: showAbortableUi,
-    canRemoveServerQueued: props.connected && props.canSend && !props.submitDisabledReason,
-    onQueueRetry:
-      props.connected && props.canSend && !props.submitDisabledReason
-        ? props.onQueueRetry
-        : undefined,
-    onQueueSteer:
-      props.connected && props.canSend && !props.submitDisabledReason
-        ? props.onQueueSteer
-        : undefined,
-    // Reordering is local bookkeeping, so it stays available while offline —
-    // exactly when a queue is long enough to need it.
-    onQueueMove: props.onQueueMove,
-    onQueueEdit: props.queuedEdit?.onEdit,
-    onQueueEditChange: props.queuedEdit?.onEditChange,
-    onQueueEditSubmit: props.queuedEdit?.onEditSubmit,
-    onQueueEditCancel: props.queuedEdit?.onCancel,
-    editingId: props.queuedEdit?.editingId ?? null,
-    editingText: props.queuedEdit?.editingText,
-    editingMentions: props.queuedEdit?.editingMentions,
-    editingSource: props.queuedEdit?.source,
-    onQueueRemove: props.onQueueRemove,
-  });
+  const queue = renderChatComposerQueue(props, showAbortableUi);
   const goalCard = activeSession?.goal
     ? html`<div class="agent-chat__goal-float">
         ${renderChatGoal(state, activeSession.goal, {
-          canAct: props.connected && props.canSend && !props.goalRecovery,
+          canAct:
+            props.connected &&
+            props.canSend &&
+            !props.submitDisabledReason &&
+            Boolean(props.currentSessionId) &&
+            !props.goalRecovery,
           onGoalAction: props.onGoalAction,
           onGoalEdit: props.onGoalSubmit ? (goal) => goalComposer.begin(goal) : undefined,
           requestUpdate,
@@ -450,7 +459,11 @@ export function renderChatComposerView(context: ChatComposerViewContext) {
                 ${renderAttachmentPreview(props)}
                 ${renderAttachmentReadStatus(props.getPendingAttachmentReads?.() ?? props.pendingAttachmentReads ?? 0)}
                 ${renderComposerDictationStatus(dictation)}
-                ${renderChatAttachmentInputs({ ...props, disabled: !canCompose })}
+                ${renderChatAttachmentInputs({
+                  ...props,
+                  disabled: !canCompose,
+                  cameraActive: showComposer && props.cameraActive !== false,
+                })}
                 ${
                   props.realtimeTalkVideoStream
                     ? html`

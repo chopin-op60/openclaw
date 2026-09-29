@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { getAcpSessionManager } from "../../../acp/control-plane/manager.js";
-import type { AcpSessionTarget } from "../../../acp/control-plane/manager.types.js";
 import { resolveAcpSessionResolutionError } from "../../../acp/control-plane/manager.utils.js";
 import { cleanupFailedAcpSpawn } from "../../../acp/control-plane/spawn.js";
 import {
@@ -14,11 +13,7 @@ import {
 } from "../../../acp/policy.js";
 import { toAcpRuntimeErrorText } from "../../../acp/runtime/errors.js";
 import { resolveSessionStorePathForAcp } from "../../../acp/runtime/session-meta.js";
-import {
-  closeAdmittedRunDelegatedAuthority,
-  createOperationalRunInstanceRef,
-  prepareAgentRunAdmission,
-} from "../../../agents/admitted-run-context.js";
+import { closeAdmittedRunDelegatedAuthority } from "../../../agents/admitted-run-context.js";
 import { resolveSpawnedWorkspaceInheritance } from "../../../agents/spawned-context.js";
 import {
   resolveAcpSpawnRuntimePolicyError,
@@ -31,9 +26,13 @@ import {
 import { updateSessionEntry } from "../../../config/sessions/session-accessor.js";
 import type { SessionAcpMeta, SessionEntry } from "../../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import {
+  getGatewayLocalUserIngress,
+  type GatewayLocalUserIngress,
+} from "../../../gateway/local-user-ingress.js";
 import { formatErrorMessage } from "../../../infra/errors.js";
 import { getSessionBindingService } from "../../../infra/outbound/session-binding-service.js";
-import { consumeChannelRunAdmission } from "../channel-run-admission.js";
+import { prepareChannelRunAdmission } from "../channel-run-admission.js";
 import { commandReply } from "../command-gates.js";
 import type { CommandHandlerResult, HandleCommandsParams } from "../commands-types.js";
 import {
@@ -293,21 +292,6 @@ async function resolveAcpSessionForCommandOrStop(params: {
   return null;
 }
 
-async function resolveAcpTokenTargetSessionKeyOrStop(params: {
-  commandParams: HandleCommandsParams;
-  restTokens: string[];
-}): Promise<AcpSessionTarget | CommandHandlerResult> {
-  const token = normalizeOptionalString(params.restTokens.join(" "));
-  const target = await resolveAcpTargetSessionKey({
-    commandParams: params.commandParams,
-    token,
-  });
-  if (!target.ok) {
-    return commandReply(`⚠️ ${target.error}`);
-  }
-  return target;
-}
-
 async function withResolvedAcpSessionTarget(params: {
   commandParams: HandleCommandsParams;
   restTokens: string[];
@@ -318,12 +302,12 @@ async function withResolvedAcpSessionTarget(params: {
   }) => Promise<CommandHandlerResult>;
 }): Promise<CommandHandlerResult> {
   const acpManager = getAcpSessionManager();
-  const target = await resolveAcpTokenTargetSessionKeyOrStop({
+  const target = await resolveAcpTargetSessionKey({
     commandParams: params.commandParams,
-    restTokens: params.restTokens,
+    token: normalizeOptionalString(params.restTokens.join(" ")),
   });
-  if (!("sessionKey" in target)) {
-    return target;
+  if (!target.ok) {
+    return commandReply(`⚠️ ${target.error}`);
   }
   const guardFailure = await resolveAcpSessionForCommandOrStop({
     acpManager,
@@ -373,25 +357,19 @@ async function runAcpSteer(params: {
   instruction: string;
   requestId: string;
   channelAdmissionEvidence?: ChannelAdmissionEvidence;
+  gatewayLocalUserIngress?: GatewayLocalUserIngress;
 }): Promise<string> {
   const acpManager = getAcpSessionManager();
   let output = "";
-  const channelAdmission = consumeChannelRunAdmission(params.channelAdmissionEvidence);
-  const admittedRunContext = await prepareAgentRunAdmission({
+  const admittedRunContext = await prepareChannelRunAdmission({
     assertSourceCurrent: params.assertOwnerCurrent,
     cfg: params.cfg,
-    operationalRunInstance: createOperationalRunInstanceRef(params.requestId),
-    facts: {
-      runId: params.requestId,
-      agentId: params.agentId,
-      ingress: {
-        kind: "acp",
-        boundary: "acp.command.steer",
-        state: channelAdmission.ingressState,
-      },
-      ...channelAdmission.facts,
-    },
-    onAdmitted: channelAdmission.onAdmitted,
+    runId: params.requestId,
+    agentId: params.agentId,
+    ingressKind: "acp",
+    boundary: "acp.command.steer",
+    evidence: params.channelAdmissionEvidence,
+    gatewayLocalUserIngress: params.gatewayLocalUserIngress,
   }).admit("acp");
 
   try {
@@ -474,6 +452,7 @@ export async function handleAcpSteerAction(
         instruction: parsed.value.instruction,
         requestId: `${resolveCommandRequestId(params)}:steer`,
         channelAdmissionEvidence: readChannelContextAdmissionEvidence(params.rootCtx ?? params.ctx),
+        gatewayLocalUserIngress: getGatewayLocalUserIngress(params.rootCtx ?? params.ctx),
       }),
     fallbackCode: "ACP_TURN_FAILED",
     fallbackMessage: "ACP steer failed before completion.",

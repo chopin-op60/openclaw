@@ -54,6 +54,7 @@ export type DispatchGatewayMethodInProcessOptions = {
   signal?: AbortSignal;
   hasCurrentClientAuthority?: GatewayRequestOptions["hasCurrentClientAuthority"];
   resolveGatewayContext?: GatewayContextResolver;
+  prepareDispatchCurrent?: () => Promise<void>;
   sessionMutationCommitGuard?: () => void;
 };
 
@@ -78,4 +79,6 @@ export type OperatorToolGatewayAuthority = {
   operatorRunAuthority?: AdmittedRunOperatorAuthority;
   signal: AbortSignal;
   assertCurrent?: () => void;
+  /** Pure input policy; applies at effects, never settled results or cleanup. */
+  assertInputCommitAllowed?: () => void;
 };

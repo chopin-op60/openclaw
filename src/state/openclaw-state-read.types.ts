@@ -37,6 +37,7 @@ import type {
 } from "../gateway/session-group-catalog.types.js";
 import type {
   WorkerPlacementConflictBinding,
+  WorkerPlacementRecoveryCandidate,
   WorkerSessionPlacementReadResult,
 } from "../gateway/worker-environments/placement-read-projection.types.js";
 import type { WorkerSessionPlacementChangeSnapshot } from "../gateway/worker-environments/placement-record.js";
@@ -60,8 +61,14 @@ import type {
   readInterruptedUpdateCandidate,
   readUpdateRunRecord,
   readUpdateRuns,
+  readUpdateRunStatusInDatabase,
+  readUpdateRunHistoryStatusInDatabase,
   UpdateRunListInput,
 } from "../infra/update-run-read.kernel.js";
+import type {
+  UpdateRunReconciliationInput,
+  UpdateRunReconciliationCandidate,
+} from "../infra/update-run-reconciliation.types.js";
 import type {
   PluginBlobReadCommand,
   PluginBlobReadReply,
@@ -188,6 +195,10 @@ export type OpenClawStateReadCommand =
   | { type: "updateRuns.get"; runId: string }
   | { type: "updateRuns.list"; input: UpdateRunListInput }
   | { type: "updateRuns.interruptedCandidate" }
+  | { type: "updateRuns.reconciliationCandidates"; input: UpdateRunReconciliationInput }
+  | { type: "updateRuns.reconciliationCandidate"; runId: string }
+  | { type: "updateRuns.status" }
+  | { type: "updateRuns.historyStatus" }
   | { type: "worktrees.cleanupState" }
   | { type: "fleet.list" }
   | { type: "workerPlacements.changeSnapshot"; profileIds?: string[] }
@@ -203,6 +214,7 @@ export type OpenClawStateReadCommand =
   | { type: "sandboxRegistry.get"; containerName: string }
   | { type: "sandboxRegistry.runtimeIds"; backendId: string; scopeKey: string }
   | { type: "sandboxRegistry.browsers" }
+  | { type: "workers.placementRecoveryCandidates" }
   | {
       type: "workers.placementProjection";
       sessionIds: readonly string[];
@@ -405,6 +417,16 @@ export type OpenClawStateReadResult =
       type: "updateRuns.interruptedCandidate";
       run: ReturnType<typeof readInterruptedUpdateCandidate>;
     }
+  | { type: "updateRuns.reconciliationCandidates"; candidates: UpdateRunReconciliationCandidate[] }
+  | {
+      type: "updateRuns.reconciliationCandidate";
+      candidate: UpdateRunReconciliationCandidate | undefined;
+    }
+  | { type: "updateRuns.status"; status: ReturnType<typeof readUpdateRunStatusInDatabase> }
+  | {
+      type: "updateRuns.historyStatus";
+      status: ReturnType<typeof readUpdateRunHistoryStatusInDatabase>;
+    }
   | {
       type: "worktrees.cleanupState";
       records: ManagedWorktreeRecord[];
@@ -438,6 +460,7 @@ export type OpenClawStateReadResult =
       type: "sandboxRegistry.browsers";
       entries: SandboxBrowserRegistryEntry[];
     }
+  | { type: "workers.placementRecoveryCandidates"; candidates: WorkerPlacementRecoveryCandidate[] }
   | {
       type: "workers.placementProjection";
       result: WorkerSessionPlacementReadResult;
@@ -475,6 +498,8 @@ export type OpenClawStateReadOptions = {
   context?: OpenClawStateWorkerContext;
   /** Publication and authority reads must not inherit an inspection snapshot. */
   current?: boolean;
+  /** Named committed-status readers may reopen the matching retained warm source. */
+  preferIndependentWarmRead?: true;
   mapError?: (error: unknown, phase: OpenClawStateReadPhase) => unknown;
 };
 
