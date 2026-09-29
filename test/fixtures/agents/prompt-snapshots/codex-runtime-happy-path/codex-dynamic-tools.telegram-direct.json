@@ -307,7 +307,7 @@
           "type": "string"
         },
         "runTimeoutSeconds": {
-          "description": "Per-run timeout in seconds; overrides the configured subagent default. Zero disables the timeout.",
+          "description": "Child run timeout in seconds; overrides the configured subagent default and is preserved on native continuations. Zero disables the timeout; requester wake turns use their own budget.",
           "minimum": 0,
           "type": "integer"
         },
@@ -325,6 +325,10 @@
         },
         "thinking": {
           "description": "Thinking override; unavailable with visible=true.",
+          "type": "string"
+        },
+        "user": {
+          "description": "The person's requester_profile.id, required when several people have steered this turn.",
           "type": "string"
         },
         "visible": {
@@ -1145,6 +1149,10 @@
             },
             "sessionKey": {
               "type": "string"
+            },
+            "user": {
+              "description": "The person's requester_profile.id, required when several people have steered this turn.",
+              "type": "string"
             }
           },
           "type": "object"
@@ -1186,6 +1194,10 @@
             },
             "sessionKey": {
               "minLength": 1,
+              "type": "string"
+            },
+            "user": {
+              "description": "The person's requester_profile.id, required when several people have steered this turn.",
               "type": "string"
             }
           },
@@ -1283,6 +1295,10 @@
               "minLength": 1,
               "type": "string"
             },
+            "user": {
+              "description": "The person's requester_profile.id, required when several people have steered this turn.",
+              "type": "string"
+            },
             "workspaceDir": {
               "minLength": 1,
               "type": "string"
@@ -1309,6 +1325,10 @@
               "type": "string"
             },
             "sessionKey": {
+              "type": "string"
+            },
+            "user": {
+              "description": "The person's requester_profile.id, required when several people have steered this turn.",
               "type": "string"
             }
           },
@@ -1362,6 +1382,10 @@
             "timeoutSeconds": {
               "minimum": 0,
               "type": "integer"
+            },
+            "user": {
+              "description": "The person's requester_profile.id, required when several people have steered this turn.",
+              "type": "string"
             },
             "watch": {
               "type": "boolean"
