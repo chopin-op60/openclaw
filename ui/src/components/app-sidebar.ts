@@ -13,6 +13,7 @@ import { beginNativeWindowDragFromTopInset } from "../app/native-window-drag.ts"
 import { t } from "../i18n/index.ts";
 import { createIdleImport } from "../lib/idle-import.ts";
 import "./session-menu.ts";
+import "./mcp-app-catalog.ts";
 import "./sidebar-agent-card.ts";
 import "./sidebar-attention.ts";
 import { shouldHandleNavigationClick } from "../lib/navigation-click.ts";
@@ -57,6 +58,7 @@ import {
   setStoredSessionCatalogHidden,
   storeSidebarCatalogGrouping,
   type SidebarRecentSession,
+  type SidebarToolActivity,
 } from "./app-sidebar-session-types.ts";
 import { renderCommunityInviteCard } from "./community-invite-card.ts";
 import {
@@ -74,11 +76,12 @@ import { SidebarPeopleController } from "./sidebar-people-controller.ts";
 class AppSidebar extends AppSidebarSessionNavigationElement implements SessionListHost {
   @state() teamOnlineExpanded = false;
   @state() override sidebarNarrationLines: ReadonlyMap<string, string> = new Map();
+  @state() override sidebarTools: ReadonlyMap<string, SidebarToolActivity> = new Map();
   @state() override sidebarObserverDigests: ReadonlyMap<string, SessionObserverDigest> = new Map();
 
   override readonly sessionOrganizer = new SessionOrganizerController(this);
   override readonly sidebarMenus = new SidebarMenusController(this);
-  private readonly people = new SidebarPeopleController(this);
+  readonly people = new SidebarPeopleController(this);
 
   sessionGroupDefaults(name: string) {
     if (this.context?.sessions.groupsStatus() !== "ready") {
@@ -135,23 +138,13 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
       () => this.context?.gateway,
       (gateway) => gateway.subscribeEvents((event) => this.narration?.handleEvent(event)),
     )
-    .watch(
-      () => this.context?.agentIdentity,
-      (agentIdentity, notify) => agentIdentity.subscribe(notify),
-    )
-    .watch(
-      () => this.context?.theme,
-      (theme, notify) => theme.subscribe(notify),
-    )
-    .watch(
+    .watchStore(() => this.context?.agentIdentity)
+    .watchStore(() => this.context?.theme)
+    .watchStore(
       () => this.context?.config,
-      (config, notify) => config.subscribe(notify),
       () => this.syncCommunityInviteState(),
     )
-    .watch(
-      () => this.context?.plugins,
-      (plugins, notify) => plugins.subscribe(notify),
-    );
+    .watchStore(() => this.context?.plugins);
   private readonly nativeGatewaysChanged = () => this.sidebarMenus.closeSessionMenu();
   private readonly hiddenSessionCatalogsChanged = () => {
     this.hiddenSessionCatalogIds = loadStoredHiddenSessionCatalogIds();
@@ -293,6 +286,9 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
         },
         (digests) => {
           this.sidebarObserverDigests = digests;
+        },
+        (tools) => {
+          this.sidebarTools = tools;
         },
       );
       this.narration.sync(this.narrationSyncInput());
@@ -567,6 +563,7 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
                   @drop=${(event: DragEvent) => this.sessionOrganizer.handleSidebarZoneDrop(event)}
                 >
                   ${renderAppSidebarHomeRow(this)}
+                  <openclaw-mcp-app-catalog surface="sidebar"></openclaw-mcp-app-catalog>
                   ${repeat(sidebarZone.entries, serializeSidebarEntry, (entry) =>
                     renderAppSidebarZoneEntry(
                       this,
@@ -592,7 +589,7 @@ class AppSidebar extends AppSidebarSessionNavigationElement implements SessionLi
             }
           </div>
           <div class="sidebar-shell__invite">
-            ${this.communityInvitePresentation === "shown" ? renderCommunityInviteCard(this.dismissCommunityInvite) : nothing}
+            ${this.communityInvitePresentation === "shown" ? renderCommunityInviteCard(this.dismissCommunityInvite, this.context?.theme.resolvedMode ?? "dark") : nothing}
           </div>
           <div class="sidebar-shell__footer">
             ${

@@ -878,7 +878,7 @@ description: Broken skill
           defaults: {
             skills: ["github"],
           },
-          list: [{ id: "writer" }],
+          entries: { writer: {} },
         },
       },
       agentId: "writer",
@@ -892,7 +892,7 @@ description: Broken skill
           defaults: {
             skills: ["github"],
           },
-          list: [{ id: "writer", skills: ["docs-search"] }],
+          entries: { writer: { skills: ["docs-search"] } },
         },
       },
       agentId: "writer",
@@ -916,7 +916,7 @@ description: Broken skill
           defaults: {
             skills: ["remote-only"],
           },
-          list: [{ id: "writer" }],
+          entries: { writer: {} },
         },
       },
       agentId: "writer",

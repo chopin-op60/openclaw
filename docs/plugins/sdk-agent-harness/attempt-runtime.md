@@ -125,6 +125,11 @@ policy. Supply `assertCurrent` when native session or transport ownership can be
 revoked independently of the host attempt. The host retains this additional check
 through the final media write and publication. Keep the reader alive until preparation finishes.
 
+Raw file paths in these replies belong to the remote workspace. Paths outside
+that workspace fail with a labeled remote-file notice, even if a Gateway-local
+file exists at the same path. HTTP references and securely validated Gateway
+managed media, including `media://` attachments, remain available.
+
 For artifacts whose bytes the provider has already admitted, use `kind: "artifact"`
 with `buffer`, `fileName`, `assertCurrent`, and an optional `signal`. The host
 stages those exact bytes under the captured channel/account byte limit and returns
@@ -160,6 +165,16 @@ Supply `messages` as an array or an async loader, which runs only when a `before
 hook needs history. Heartbeat-only contributions do not read conversation history.
 The production-private `resolveAgentHarnessHistoryLimits` helper applies the shared
 Codex and Agents API transcript read budget.
+
+Agents API retains the first successfully prepared, bounded hook history for
+retries of the same logical run and native session. Prompt hooks still run on
+each attempt with the current input and live host authority; their history stays
+at the original before-turn snapshot. Accepted steering therefore does not force
+a new transcript read through the original message's now-stale admission.
+This snapshot is data, not renewed transcript-read permission: later transcript
+changes are observed by the next logical run, and a changed recorder, session,
+run identity, or history budget requires a fresh read. Session reset and run
+cancellation retain their existing authority checks.
 
 The `developerInstructions.build` callback receives `toolsAllow` and
 `hasToolRestrictions`. Omitted policy or a trimmed `*` entry is unrestricted;

@@ -1,10 +1,12 @@
 import type { HealthFinding } from "openclaw/plugin-sdk/health";
-import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import {
+  isRecord,
+  normalizeLowercaseStringOrEmpty as normalizePolicyChannelId,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { PolicyEvidence, PolicyIngressEvidence } from "../policy-state.js";
 import { ingressPolicyShapeFinding } from "./access-shapes.js";
 import { CHECK_IDS } from "./check-ids.js";
 import { policyEvidenceFinding as ingressFinding } from "./policy-evidence-finding.js";
-import { normalizePolicyChannelId } from "./policy-runtime.js";
 import { channelScopedPolicyTargets } from "./policy-scope.js";
 import { hasValidScopedPolicy } from "./scoped-policy-shape.js";
 import { ocPathSegment, readPolicyBoolean, readPolicyPathString, readStringList } from "./utils.js";
@@ -30,16 +32,7 @@ export function ingressFindings(
   }
   if (hasValidScopedPolicy(policy, policyPath, policyDocName)) {
     for (const target of channelScopedPolicyTargets(policy)) {
-      if (
-        ingressPolicyShapeFinding(target.overlay.ingress, {
-          policyDocName,
-          policyPath,
-          targetPrefix: `scopes/${ocPathSegment(target.scopeName)}/ingress`,
-          propertyPrefix: `scopes.${target.scopeName}.ingress`,
-          allowSession: false,
-        }) !== undefined ||
-        !isRecord(target.overlay.ingress)
-      ) {
+      if (!isRecord(target.overlay.ingress)) {
         continue;
       }
       findings.push(

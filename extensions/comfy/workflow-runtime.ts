@@ -12,7 +12,6 @@ import {
 import { resolveApiKeyForProvider } from "openclaw/plugin-sdk/provider-auth-runtime";
 import {
   assertOkOrThrowHttpError,
-  normalizeBaseUrl,
   readProviderBinaryResponse,
   readProviderJsonResponse,
   redactProviderResponseErrorText,
@@ -42,9 +41,6 @@ import { resolveUserPath } from "openclaw/plugin-sdk/text-utility-runtime";
 
 const DEFAULT_COMFY_LOCAL_BASE_URL = "http://127.0.0.1:8188";
 const DEFAULT_COMFY_CLOUD_BASE_URL = "https://cloud.comfy.org";
-const DEFAULT_PROMPT_INPUT_NAME = "text";
-const DEFAULT_INPUT_IMAGE_INPUT_NAME = "image";
-const DEFAULT_SEED_INPUT_NAME = "seed";
 const DEFAULT_POLL_INTERVAL_MS = 1_500;
 const DEFAULT_TIMEOUT_MS = 5 * 60_000;
 // randomInt requires a range below 2**48; these seeds also round-trip through JSON exactly.
@@ -85,7 +81,6 @@ type ComfyApiKeyResolution =
   | {
       status: "available";
       apiKey: string;
-      source: string;
     }
   | {
       status: "missing";
@@ -110,8 +105,7 @@ type ComfyGeneratedAsset = {
 type ComfyWorkflowResult = {
   assets: ComfyGeneratedAsset[];
   model: string;
-  promptId: string;
-  outputNodeIds: string[];
+  metadata: { promptId: string; outputNodeIds: string[] };
 };
 
 function readConfigInteger(config: ComfyProviderConfig, key: string): number | undefined {
@@ -160,7 +154,6 @@ function resolveComfyApiKey(
       ? {
           status: "available",
           apiKey,
-          source: "plugins.entries.comfy.config.apiKey",
         }
       : { status: "missing" };
   }
@@ -183,45 +176,25 @@ function resolveComfyApiKey(
       ? {
           status: "available",
           apiKey,
-          source: `plugins.entries.comfy.config.apiKey (${envVarName})`,
         }
       : { status: "configured_unavailable" };
   }
   return { status: "missing" };
 }
 
-function getRequiredConfigString(config: ComfyProviderConfig, key: string): string {
-  const value = normalizeOptionalString(config[key]);
-  if (!value) {
-    throw new Error(`plugins.entries.comfy.config.${key} is required`);
-  }
-  return value;
-}
-
-function resolveComfyWorkflowSource(config: ComfyProviderConfig): {
-  workflow?: ComfyWorkflow;
-  workflowPath?: string;
-} {
+async function loadComfyWorkflow(config: ComfyProviderConfig): Promise<ComfyWorkflow> {
   const workflow = config.workflow;
   if (isRecord(workflow)) {
-    return { workflow: structuredClone(workflow) };
+    return structuredClone(workflow);
   }
   const workflowPath = normalizeOptionalString(config.workflowPath);
-  return { workflowPath };
-}
-
-async function loadComfyWorkflow(config: ComfyProviderConfig): Promise<ComfyWorkflow> {
-  const source = resolveComfyWorkflowSource(config);
-  if (source.workflow) {
-    return source.workflow;
-  }
-  if (!source.workflowPath) {
+  if (!workflowPath) {
     throw new Error(
       "plugins.entries.comfy.config.<capability>.workflow or workflowPath is required",
     );
   }
 
-  const resolvedPath = resolveUserPath(source.workflowPath);
+  const resolvedPath = resolveUserPath(workflowPath);
   const raw = await fs.readFile(resolvedPath, "utf8");
   const parsed = JSON.parse(raw) as unknown;
   if (!isRecord(parsed)) {
@@ -230,21 +203,21 @@ async function loadComfyWorkflow(config: ComfyProviderConfig): Promise<ComfyWork
   return parsed;
 }
 
-function setWorkflowInput(params: {
-  workflow: ComfyWorkflow;
-  nodeId: string;
-  inputName: string;
-  value: unknown;
-}): void {
-  const node = params.workflow[params.nodeId];
+function setWorkflowInput(
+  workflow: ComfyWorkflow,
+  nodeId: string,
+  inputName: string,
+  value: unknown,
+): void {
+  const node = workflow[nodeId];
   if (!isRecord(node)) {
-    throw new Error(`Comfy workflow missing node "${params.nodeId}"`);
+    throw new Error(`Comfy workflow missing node "${nodeId}"`);
   }
   const inputs = node.inputs;
   if (!isRecord(inputs)) {
-    throw new Error(`Comfy workflow node "${params.nodeId}" is missing an inputs object`);
+    throw new Error(`Comfy workflow node "${nodeId}" is missing an inputs object`);
   }
-  inputs[params.inputName] = params.value;
+  inputs[inputName] = value;
 }
 
 async function resolveComfyHeadersConfig(
@@ -281,10 +254,8 @@ function resolveComfyNetworkPolicy(params: {
   explicitAllowPrivateNetwork: boolean;
   mode: ComfyMode;
 }): SsrFPolicy | undefined {
-  let parsed: URL;
-  try {
-    parsed = new URL(params.baseUrl);
-  } catch {
+  const parsed = URL.parse(params.baseUrl);
+  if (!parsed) {
     return undefined;
   }
 
@@ -335,18 +306,12 @@ async function readJsonResponse<T>(params: {
   auditContext: string;
   errorPrefix: string;
 }): Promise<T> {
-  const { response, release } = await fetchWithSsrFGuard({
-    url: params.url,
-    init: params.init,
-    timeoutMs: params.timeoutMs,
-    policy: params.policy,
-    dispatcherPolicy: params.dispatcherPolicy,
-    auditContext: params.auditContext,
-  });
+  const { errorPrefix, ...request } = params;
+  const { response, release } = await fetchWithSsrFGuard(request);
   try {
     const requestHeaders = params.init?.headers;
-    await assertOkOrThrowHttpError(response, params.errorPrefix, { requestHeaders });
-    return await readProviderJsonResponse<T>(response, params.errorPrefix, { requestHeaders });
+    await assertOkOrThrowHttpError(response, errorPrefix, { requestHeaders });
+    return await readProviderJsonResponse<T>(response, errorPrefix, { requestHeaders });
   } finally {
     await release();
   }
@@ -629,8 +594,7 @@ export function isComfyCapabilityConfigured(params: {
   const { config } = getComfyConfig(params.cfg);
   const capabilityConfig = getComfyCapabilityConfig(config, params.capability);
   const hasWorkflow = Boolean(
-    resolveComfyWorkflowSource(capabilityConfig).workflow ||
-    normalizeOptionalString(capabilityConfig.workflowPath),
+    isRecord(capabilityConfig.workflow) || normalizeOptionalString(capabilityConfig.workflowPath),
   );
   const hasPromptNode = Boolean(normalizeOptionalString(capabilityConfig.promptNodeId));
   if (!hasWorkflow || !hasPromptNode) {
@@ -664,22 +628,22 @@ export async function runComfyWorkflow(params: {
   model?: string;
   timeoutMs?: number;
   capability: ComfyCapability;
-  outputKinds: readonly ComfyOutputKind[];
   inputImage?: ComfySourceImage;
 }): Promise<ComfyWorkflowResult> {
   const { config, path: configPath } = getComfyConfig(params.cfg);
   const capabilityConfig = getComfyCapabilityConfig(config, params.capability);
   const mode = resolveComfyMode(capabilityConfig);
   const workflow = await loadComfyWorkflow(capabilityConfig);
-  const promptNodeId = getRequiredConfigString(capabilityConfig, "promptNodeId");
-  const promptInputName =
-    normalizeOptionalString(capabilityConfig.promptInputName) ?? DEFAULT_PROMPT_INPUT_NAME;
+  const promptNodeId = normalizeOptionalString(capabilityConfig.promptNodeId);
+  if (!promptNodeId) {
+    throw new Error("plugins.entries.comfy.config.promptNodeId is required");
+  }
+  const promptInputName = normalizeOptionalString(capabilityConfig.promptInputName) ?? "text";
   const inputImageNodeId = normalizeOptionalString(capabilityConfig.inputImageNodeId);
   const inputImageInputName =
-    normalizeOptionalString(capabilityConfig.inputImageInputName) ?? DEFAULT_INPUT_IMAGE_INPUT_NAME;
+    normalizeOptionalString(capabilityConfig.inputImageInputName) ?? "image";
   const seedNodeId = normalizeOptionalString(capabilityConfig.seedNodeId);
-  const seedInputName =
-    normalizeOptionalString(capabilityConfig.seedInputName) ?? DEFAULT_SEED_INPUT_NAME;
+  const seedInputName = normalizeOptionalString(capabilityConfig.seedInputName) ?? "seed";
   const outputNodeId = normalizeOptionalString(capabilityConfig.outputNodeId);
   const pollIntervalMs = resolvePositiveTimerTimeoutMs(
     readConfigInteger(capabilityConfig, "pollIntervalMs"),
@@ -691,41 +655,29 @@ export async function runComfyWorkflow(params: {
   );
   const providerModel = normalizeOptionalString(params.model) || DEFAULT_COMFY_MODEL;
 
-  setWorkflowInput({
-    workflow,
-    nodeId: promptNodeId,
-    inputName: promptInputName,
-    value: params.prompt,
-  });
+  setWorkflowInput(workflow, promptNodeId, promptInputName, params.prompt);
 
   if (seedNodeId) {
-    setWorkflowInput({
-      workflow,
-      nodeId: seedNodeId,
-      inputName: seedInputName,
-      value: randomInt(RANDOM_SEED_EXCLUSIVE_MAX),
-    });
+    setWorkflowInput(workflow, seedNodeId, seedInputName, randomInt(RANDOM_SEED_EXCLUSIVE_MAX));
   }
 
   const pluginApiKey = resolveComfyApiKey(capabilityConfig, params.cfg);
-  const resolvedAuth =
+  const apiKey =
     mode === "cloud"
       ? pluginApiKey.status === "available"
-        ? {
-            apiKey: pluginApiKey.apiKey,
-            source: pluginApiKey.source,
-            mode: "api-key" as const,
-          }
+        ? pluginApiKey.apiKey
         : pluginApiKey.status === "configured_unavailable"
-          ? null
-          : await resolveApiKeyForProvider({
-              provider: "comfy",
-              cfg: params.cfg,
-              agentDir: params.agentDir,
-              store: params.authStore,
-            })
-      : null;
-  if (mode === "cloud" && !resolvedAuth?.apiKey) {
+          ? undefined
+          : (
+              await resolveApiKeyForProvider({
+                provider: "comfy",
+                cfg: params.cfg,
+                agentDir: params.agentDir,
+                store: params.authStore,
+              })
+            ).apiKey
+      : undefined;
+  if (mode === "cloud" && !apiKey) {
     throw new Error("Comfy Cloud API key missing");
   }
 
@@ -740,7 +692,7 @@ export async function runComfyWorkflow(params: {
       defaultHeaders:
         mode === "cloud"
           ? {
-              "X-API-Key": resolvedAuth?.apiKey ?? "",
+              "X-API-Key": apiKey ?? "",
               "Content-Type": "application/json",
             }
           : {
@@ -750,11 +702,8 @@ export async function runComfyWorkflow(params: {
       capability: params.capability === "music" ? "audio" : params.capability,
       transport: "http",
     });
-  const normalizedBaseUrl =
-    normalizeBaseUrl(baseUrl) ||
-    (mode === "cloud" ? DEFAULT_COMFY_CLOUD_BASE_URL : DEFAULT_COMFY_LOCAL_BASE_URL);
   const networkPolicy = resolveComfyNetworkPolicy({
-    baseUrl: normalizedBaseUrl,
+    baseUrl,
     allowPrivateNetwork,
     explicitAllowPrivateNetwork,
     mode,
@@ -767,7 +716,7 @@ export async function runComfyWorkflow(params: {
       );
     }
     const uploadedName = await uploadInputImage({
-      baseUrl: normalizedBaseUrl,
+      baseUrl,
       headers: new Headers(headers),
       timeoutMs,
       policy: networkPolicy,
@@ -776,23 +725,16 @@ export async function runComfyWorkflow(params: {
       mode,
       capability: params.capability,
     });
-    setWorkflowInput({
-      workflow,
-      nodeId: inputImageNodeId,
-      inputName: inputImageInputName,
-      value: uploadedName,
-    });
+    setWorkflowInput(workflow, inputImageNodeId, inputImageInputName, uploadedName);
   }
 
   const submitPayload = {
     prompt: workflow,
-    ...(mode === "cloud" && resolvedAuth?.apiKey
-      ? { extra_data: { api_key_comfy_org: resolvedAuth.apiKey } }
-      : {}),
+    ...(mode === "cloud" && apiKey ? { extra_data: { api_key_comfy_org: apiKey } } : {}),
   };
 
   const promptResponse = await readJsonResponse<ComfyPromptResponse>({
-    url: `${normalizedBaseUrl}${mode === "cloud" ? "/api/prompt" : "/prompt"}`,
+    url: `${baseUrl}${mode === "cloud" ? "/api/prompt" : "/prompt"}`,
     init: {
       method: "POST",
       headers,
@@ -811,7 +753,7 @@ export async function runComfyWorkflow(params: {
   }
 
   const history = await waitForComfyHistory({
-    baseUrl: normalizedBaseUrl,
+    baseUrl,
     promptId,
     headers: new Headers(headers),
     timeoutMs,
@@ -829,7 +771,12 @@ export async function runComfyWorkflow(params: {
   const outputFiles = collectOutputFiles({
     history: historyEntry,
     outputNodeId,
-    outputKinds: params.outputKinds,
+    outputKinds:
+      params.capability === "music"
+        ? ["audio"]
+        : params.capability === "video"
+          ? ["images", "gifs", "videos"]
+          : ["images"],
     capability: params.capability,
   });
   if (outputFiles.length === 0) {
@@ -841,7 +788,7 @@ export async function runComfyWorkflow(params: {
   const maxOutputBytes = resolveGeneratedMediaMaxBytes(params.cfg, outputKind);
   for (const output of outputFiles) {
     const downloaded = await downloadOutputFile({
-      baseUrl: normalizedBaseUrl,
+      baseUrl,
       headers: new Headers(headers),
       timeoutMs,
       policy: networkPolicy,
@@ -860,8 +807,7 @@ export async function runComfyWorkflow(params: {
   return {
     assets,
     model: providerModel,
-    promptId,
-    outputNodeIds: uniqueStrings(outputFiles.map((entry) => entry.nodeId)),
+    metadata: { promptId, outputNodeIds: uniqueStrings(outputFiles.map((entry) => entry.nodeId)) },
   };
 }
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

@@ -54,6 +54,7 @@ import {
   type AssistantMediaSession,
   type AssistantMediaReader,
 } from "./assistant-media-policy.js";
+import { isControlUiPrecompressedAssetExtension } from "./control-ui-asset-manifest.js";
 import { resolveControlUiBootstrapPresentation } from "./control-ui-bootstrap-presentation.js";
 import {
   buildControlUiRootAssetPath,
@@ -88,7 +89,6 @@ import { isControlUiSharePath, serveControlUiShareDocument } from "./control-ui-
 import { normalizeControlUiBasePath } from "./control-ui-shared.js";
 import {
   isControlUiFileUnmodified,
-  isControlUiPrecompressedAssetExtension,
   isControlUiStaticAssetExtension,
   resolveControlUiHtmlEncoding,
   resolveControlUiRepresentation,
@@ -164,11 +164,9 @@ type ControlUiAvatarMeta = {
   avatarReason: string | null;
 };
 
-function controlUiAvatarResolutionMeta(resolved: AgentAvatarResolution | null): {
-  avatarSource: string | null;
-  avatarStatus: AgentAvatarResolution["kind"] | null;
-  avatarReason: string | null;
-} {
+function controlUiAvatarResolutionMeta(
+  resolved: AgentAvatarResolution | null,
+): Omit<ControlUiAvatarMeta, "avatarUrl"> {
   if (!resolved) {
     return { avatarSource: null, avatarStatus: null, avatarReason: null };
   }
@@ -694,15 +692,12 @@ export async function handleControlUiAvatarRequest(
     requestAuth.assertCurrent();
     const resolved = projection.resolution;
     if (url.searchParams.get("meta") === "1") {
-      const meta = controlUiAvatarResolutionMeta(resolved);
       const avatarUrl =
         gatewayAssistantAvatarUrl(projection, basePath, agentId) ??
         (resolved?.kind === "remote" ? resolved.url : null);
       sendJson(res, 200, {
         avatarUrl,
-        avatarSource: meta.avatarSource,
-        avatarStatus: meta.avatarStatus,
-        avatarReason: meta.avatarReason,
+        ...controlUiAvatarResolutionMeta(resolved),
       } satisfies ControlUiAvatarMeta);
       return true;
     }
@@ -822,16 +817,13 @@ function isSafeRelativePath(relPath: string) {
     return false;
   }
   const normalized = path.posix.normalize(relPath);
-  if (path.posix.isAbsolute(normalized) || path.win32.isAbsolute(normalized)) {
-    return false;
-  }
-  if (normalized.startsWith("../") || normalized === "..") {
-    return false;
-  }
-  if (normalized.includes("\0")) {
-    return false;
-  }
-  return true;
+  return !(
+    path.posix.isAbsolute(normalized) ||
+    path.win32.isAbsolute(normalized) ||
+    normalized.startsWith("../") ||
+    normalized === ".." ||
+    normalized.includes("\0")
+  );
 }
 
 // The default SPA entry infers /__openclaw__ as its base path before bootstrap.
@@ -840,18 +832,11 @@ const CONTROL_UI_DEFAULT_NAMESPACE_BOOTSTRAP_CONFIG_PATH = `${CONTROL_UI_NAMESPA
   "",
 )}${CONTROL_UI_BOOTSTRAP_CONFIG_PATH}`;
 
-// v2026.6.1 clients use this pre-#66946 bootstrap suffix, including under a base path.
-const LEGACY_CONTROL_UI_NAMESPACE_PREFIX = "/__openclaw";
-const LEGACY_BOOTSTRAP_CONFIG_PATH = `${LEGACY_CONTROL_UI_NAMESPACE_PREFIX}${CONTROL_UI_BOOTSTRAP_CONFIG_PATH}`;
-
 function matchesControlUiBootstrapConfigPath(pathname: string, basePath: string): boolean {
-  if (
+  return (
     pathname === `${basePath}${CONTROL_UI_BOOTSTRAP_CONFIG_PATH}` ||
-    pathname === `${basePath}${LEGACY_BOOTSTRAP_CONFIG_PATH}`
-  ) {
-    return true;
-  }
-  return basePath === "" && pathname === CONTROL_UI_DEFAULT_NAMESPACE_BOOTSTRAP_CONFIG_PATH;
+    (basePath === "" && pathname === CONTROL_UI_DEFAULT_NAMESPACE_BOOTSTRAP_CONFIG_PATH)
+  );
 }
 
 export async function handleControlUiHttpRequest(
@@ -973,19 +958,14 @@ export async function handleControlUiHttpRequest(
   }
 
   const root = rootState.path;
-  const rootReal = await (async () => {
-    if (rootState.realPath) {
-      return rootState.realPath;
-    }
-    try {
-      return await fs.promises.realpath(root);
-    } catch (error) {
+  const rootReal =
+    rootState.realPath ||
+    (await fs.promises.realpath(root).catch((error: unknown) => {
       if (isExpectedSafePathError(error)) {
         return null;
       }
       throw error;
-    }
-  })();
+    }));
   if (!rootReal) {
     respondControlUiAssetsUnavailable(res);
     return true;

@@ -14,6 +14,7 @@ import {
   isModelIndependentChatCommand,
 } from "../../../lib/chat/commands.ts";
 import { updateHumanMentions } from "../../../lib/chat/human-mentions.ts";
+import { clearCompositionEnd, recordCompositionEnd } from "../../../lib/ime.ts";
 import { detectTextDirection } from "../../../lib/text-direction.ts";
 import { ComposerDictationController, insertComposerDictation } from "../composer-dictation.ts";
 import { normalizeChatComposerDraft } from "../composer-draft.ts";
@@ -263,13 +264,21 @@ export function renderChatComposer(props: ChatComposerProps) {
     requestUpdate,
     sendShortcut,
     canSubmitDraft,
-    commitDraft: (draft) => commitComposerDraft(props, draft),
     syncDraftAfterSend: syncComposerDraftAfterSend,
     showAbortableUi,
     alternateFollowUpMode,
     goalComposer,
   });
 
+  const updateEmojiMenu = (target: HTMLTextAreaElement) =>
+    state.emojiMenu.update(
+      target,
+      requestUpdate,
+      !state.composerComposing &&
+        !state.skillMenuOpen &&
+        !state.slashMenuOpen &&
+        !state.mentionMenu.open,
+    );
   const syncComposerValue = (target: HTMLTextAreaElement, typedAtSign = false) => {
     adjustTextareaHeight(target, { nativeInput: true });
     target.dir = detectTextDirection(target.value);
@@ -294,14 +303,7 @@ export function renderChatComposer(props: ChatComposerProps) {
       const mentionIntent = typedAtSign ? "trigger" : "input";
       state.mentionMenu.update(target, requestUpdate, mentionIntent);
     }
-    state.emojiMenu.update(
-      target,
-      requestUpdate,
-      !state.composerComposing &&
-        !state.skillMenuOpen &&
-        !state.slashMenuOpen &&
-        !state.mentionMenu.open,
-    );
+    updateEmojiMenu(target);
     // The textarea owns ordinary edits; only redraw the pane when surrounding
     // controls change. Slash and skill menus invalidate their own presentation.
     if (
@@ -358,14 +360,7 @@ export function renderChatComposer(props: ChatComposerProps) {
   };
   const handleSelect = (event: Event) => {
     const target = event.target as HTMLTextAreaElement;
-    state.emojiMenu.update(
-      target,
-      requestUpdate,
-      !state.composerComposing &&
-        !state.skillMenuOpen &&
-        !state.slashMenuOpen &&
-        !state.mentionMenu.open,
-    );
+    updateEmojiMenu(target);
     if (goalComposer.active) {
       return;
     }
@@ -377,6 +372,7 @@ export function renderChatComposer(props: ChatComposerProps) {
     updateSkillMenu(target.value, target.selectionStart, state, skillMenuHost, requestUpdate);
   };
   const handleCompositionEnd = (event: CompositionEvent) => {
+    recordCompositionEnd(event);
     state.composerComposing = false;
     if (state.composingDraft?.key === draftKey) {
       state.composingDraft = null;
@@ -386,6 +382,7 @@ export function renderChatComposer(props: ChatComposerProps) {
     props.onTypingChange?.(Boolean(value.trim()), value);
   };
   const handleBlur = (event: FocusEvent) => {
+    clearCompositionEnd(event);
     const emojiWasOpen = state.emojiMenu.open;
     state.emojiMenu.close();
     if (emojiWasOpen) {

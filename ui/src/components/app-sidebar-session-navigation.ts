@@ -27,7 +27,6 @@ import {
 import { projectSidebarAgentSessionRows } from "./app-sidebar-agent-session-rows.ts";
 import { AppSidebarBase } from "./app-sidebar-base.ts";
 import { scheduleSidebarChildSessions } from "./app-sidebar-child-session-data.ts";
-import { excludeSessionCatalogRows } from "./app-sidebar-session-catalog-state.ts";
 import {
   adoptedCatalogSessionKeys,
   type SidebarSessionCatalog,
@@ -55,6 +54,11 @@ import {
   type SidebarVisibleSections,
 } from "./app-sidebar-session-projection.ts";
 import {
+  visibleSidebarSessionCatalogs,
+  sidebarCatalogLiveRows,
+  sidebarSessionSnoozeWakeRows,
+} from "./app-sidebar-session-snooze-visibility.ts";
+import {
   loadStoredHiddenSessionCatalogIds,
   loadStoredSidebarSessionSortMode,
   loadStoredSidebarSessionStatusFilter,
@@ -66,6 +70,7 @@ import {
   storeSidebarSessionSortMode,
   type SidebarEmptyGroupsMode,
   type SidebarRecentSession,
+  type SidebarToolActivity,
   type SidebarSessionSortMode,
   type SidebarSessionStatusFilter,
 } from "./app-sidebar-session-types.ts";
@@ -197,28 +202,14 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
 
   // Adopted-key exclusion and rendering share this projection so hidden catalogs
   // never remove their adopted rows from the regular session list.
-  visibleSessionCatalogs = () =>
-    this.sessionsStatusFilter === "archived"
-      ? []
-      : excludeSessionCatalogRows(
-          this.sessionData.sessionCatalogs,
-          this.sessionData.pendingCatalogArchives,
-        ).filter((catalog) => !this.hiddenSessionCatalogIds.has(catalog.id));
+  visibleSessionCatalogs = () => visibleSidebarSessionCatalogs(this);
 
-  protected catalogLiveRows = () => [
-    ...(this.sessionData.sessionsResult?.sessions ?? []),
-    ...Object.values(this.sessionData.sessionResultsByAgent).flatMap((result) => result.sessions),
-  ];
+  protected catalogLiveRows = () => sidebarCatalogLiveRows(this.sessionData);
 
   protected sidebarSessionCatalogs = () => {
     // Catalogs consume the rows stage's resolved owner.
     this.selectedAgentSessionRows(this.getSessionNavigationState());
-    return memoizedSidebarCatalogs(
-      this.catalogsMemo,
-      this,
-      this.activeSessionOwnerId,
-      this.catalogLiveRows,
-    );
+    return memoizedSidebarCatalogs(this.catalogsMemo, this, this.activeSessionOwnerId);
   };
 
   sessionCatalogIdsWithoutVisibleRows = (): string[] => {
@@ -233,6 +224,7 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
   private readonly attention = new SessionAttentionController(this);
 
   declare readonly sidebarNarrationLines: ReadonlyMap<string, string>;
+  declare readonly sidebarTools: ReadonlyMap<string, SidebarToolActivity>;
   declare readonly sidebarObserverDigests: ReadonlyMap<string, SessionObserverDigest>;
   declare readonly sessionOrganizer: SessionOrganizerController;
   declare readonly sidebarMenus: SidebarMenusController;
@@ -261,7 +253,7 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
 
   protected override willUpdate(changedProperties: PropertyValues<this>) {
     if (this.emptyGroups.reconcile() && this.sidebarMenus.sessionSortMenuPosition) {
-      this.sidebarMenus.closeSessionSortMenu();
+      this.sidebarMenus.closePositionedMenu("sessionSort");
     }
     super.willUpdate(changedProperties);
   }
@@ -671,6 +663,13 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
         });
         return this.applySessionOwnerFilter(projected, this.selectedAgentSessionResult()?.owners);
       },
+    );
+    this.attention.scheduleSessionSnoozeWake(
+      sidebarSessionSnoozeWakeRows(
+        this.sessionData,
+        this.selectedAgentSessionResult(),
+        navigationState,
+      ),
     );
     // A pending facet refresh can settle without replacing rows; retain its lifecycle observation.
     this.sessionOwnerFilter.observeOwnerFacet(

@@ -173,8 +173,8 @@ enum CommandResolver {
         guard FileManager().fileExists(atPath: base.path) else { return [] }
         guard let entries = try? FileManager().contentsOfDirectory(atPath: base.path) else { return [] }
 
-        let sorted = entries.compactMap { entry -> (name: String, version: RuntimeVersion)? in
-            guard let version = RuntimeVersion.from(string: entry),
+        let sorted = entries.compactMap { entry -> (name: String, version: Semver)? in
+            guard let version = RuntimeLocator.parseVersion(entry),
                   RuntimeLocator.isSupportedNodeVersion(version)
             else { return nil }
             return (entry, version)
@@ -182,15 +182,11 @@ enum CommandResolver {
             first.version == second.version ? first.name > second.name : first.version > second.version
         }
 
-        var paths: [String] = []
-        for (entry, _) in sorted {
+        return sorted.compactMap { entry, _ in
             let binDir = base.appendingPathComponent(entry).appendingPathComponent(suffix)
             let node = binDir.appendingPathComponent("node")
-            if FileManager().isExecutableFile(atPath: node.path) {
-                paths.append(binDir.path)
-            }
+            return FileManager().isExecutableFile(atPath: node.path) ? binDir.path : nil
         }
-        return paths
     }
 
     static func findExecutable(named name: String, searchPaths: [String]? = nil) -> String? {
@@ -233,7 +229,7 @@ enum CommandResolver {
         // Packaging and optimization are independent: even DEBUG apps must use
         // their signed payload, including after relocation or checkout removal.
         if bundle.bundleURL.pathExtension == "app" {
-            return try BundledNodeWorker.launch(bundle: bundle, desktopSharingEnabled: desktopSharingEnabled)
+            return try BundledRuntime.launch(bundle: bundle, desktopSharingEnabled: desktopSharingEnabled)
         }
         #if DEBUG
         let root = projectRoot ?? self.projectRoot()
@@ -241,16 +237,12 @@ enum CommandResolver {
         guard FileManager().isReadableFile(atPath: sourceRunner.path) else {
             throw MacNodeHostWorker.WorkerError.unavailable(reason: "Development worker source runner is missing")
         }
-        switch await self.runtimeResolution(searchPaths: searchPaths) {
-        case let .success(runtime):
-            return MacNodeHostWorkerLaunch(
-                command: self.nodeHostWorkerCommand(
-                    prefix: [runtime.path, sourceRunner.path],
-                    desktopSharingEnabled: desktopSharingEnabled),
-                currentDirectoryURL: root)
-        case let .failure(error):
-            throw error
-        }
+        let runtime = try await self.runtimeResolution(searchPaths: searchPaths).get()
+        return MacNodeHostWorkerLaunch(
+            command: self.nodeHostWorkerCommand(
+                prefix: [runtime.path, sourceRunner.path],
+                desktopSharingEnabled: desktopSharingEnabled),
+            currentDirectoryURL: root)
         #else
         throw MacNodeHostWorker.WorkerError.unavailable(reason: "The node worker requires a packaged OpenClaw.app")
         #endif
@@ -292,6 +284,20 @@ enum CommandResolver {
     }
 
     static func resolveLocalCLI(searchPaths: [String]?, projectRoot: URL?) async -> LocalCLIResolution {
+        if BundledRuntime.isBundledApp {
+            do {
+                if let runtime = try BundledRuntime.seeded() {
+                    return .executable(runtime.cliCommand)
+                }
+            } catch {
+                return .unavailable(error.localizedDescription)
+            }
+            // Existing external and managed Node installs remain inspectable before adoption.
+            if let openclawPath = openclawExecutable(searchPaths: searchPaths) {
+                return .executable([openclawPath])
+            }
+            return .unavailable("OpenClaw's bundled runtime is not prepared. Retry setup in OpenClaw.app.")
+        }
         let root = projectRoot ?? self.projectRoot()
         if let openclawPath = projectOpenClawExecutable(projectRoot: root) {
             return .executable([openclawPath])
@@ -481,9 +487,9 @@ enum CommandResolver {
         return trimmed
     }
 
-    private static func isValidSSHComponent(_ value: String, allowLeadingDash: Bool = false) -> Bool {
+    private static func isValidSSHComponent(_ value: String) -> Bool {
         if value.isEmpty { return false }
-        if !allowLeadingDash, value.hasPrefix("-") { return false }
+        if value.hasPrefix("-") { return false }
         let invalid = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
         return value.rangeOfCharacter(from: invalid) == nil
     }
@@ -492,15 +498,9 @@ enum CommandResolver {
         let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard self.isValidSSHComponent(trimmedHost) else { return nil }
         let trimmedUser = user?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedUser: String?
-        if let trimmedUser {
-            guard self.isValidSSHComponent(trimmedUser) else { return nil }
-            normalizedUser = trimmedUser.isEmpty ? nil : trimmedUser
-        } else {
-            normalizedUser = nil
-        }
+        if let trimmedUser, !self.isValidSSHComponent(trimmedUser) { return nil }
         guard port > 0, port <= 65535 else { return nil }
-        return SSHParsedTarget(user: normalizedUser, host: trimmedHost, port: port)
+        return SSHParsedTarget(user: trimmedUser, host: trimmedHost, port: port)
     }
 
     private static func sshTargetString(_ target: SSHParsedTarget) -> String {

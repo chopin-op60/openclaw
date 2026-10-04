@@ -1,4 +1,3 @@
-// Extracts media attachment references from reply history entries.
 import { mimeTypeFromFilePath } from "@openclaw/media-core/mime";
 import { expectDefined } from "@openclaw/normalization-core";
 import { asFiniteNumber } from "@openclaw/normalization-core/number-coercion";
@@ -24,11 +23,8 @@ function isRemotePath(value: string): boolean {
   if (/^[a-z]:[\\/]/i.test(value)) {
     return false;
   }
-  try {
-    return new URL(value).protocol !== "file:";
-  } catch {
-    return false;
-  }
+  const parsed = URL.parse(value);
+  return parsed !== null && parsed.protocol !== "file:";
 }
 
 export function resolveRecentInboundHistoryImages(params: {
