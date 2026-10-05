@@ -85,7 +85,11 @@ export type PackageActivationPhase = z.infer<typeof PackageActivationPhaseSchema
 export const intentSchema = z
   .union([
     z.strictObject({
-      kind: z.literal("superseded-by-manual-install"),
+      kind: z.enum([
+        "superseded-by-manual-install",
+        "recovery-lease-identity-changed",
+        "recovery-lease-missing",
+      ]),
       replacementIdentity: packageActivationIdentitySchema,
       settled: z.boolean(),
     }),

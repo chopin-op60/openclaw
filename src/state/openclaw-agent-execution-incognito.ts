@@ -1,9 +1,14 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { IncognitoAcpSessionAccess } from "../acp/runtime/session-meta-incognito.types.js";
+import { cloneEnvWithPlatformSemantics } from "../config/config-env-vars.js";
 import { resolveStateDir } from "../config/paths.js";
+import { captureRuntimeConfigWithSource } from "../config/runtime-config-capture-state.js";
+import { resolveSessionStorePathCore } from "../config/sessions/paths.js";
 import {
   createIncognitoSessionFacts,
+  type IncognitoSessionActor,
   type IncognitoSessionRunner,
 } from "../config/sessions/session-incognito-actor.js";
 import { forkIncognitoSessionFromParent } from "../config/sessions/session-incognito-lifecycle.js";
@@ -22,6 +27,7 @@ import {
 } from "../infra/sqlite-worker-store.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { captureAgentDatabaseAdmission } from "./agent-database-admission.js";
+import { IncognitoSessionEndedError } from "./incognito-session-error.js";
 import type { OpenClawAgentDatabaseOptions } from "./openclaw-agent-db-contract.js";
 import {
   agentDatabaseLifecycle,
@@ -32,25 +38,19 @@ import {
   assertIncognitoAgentDatabasePathAvailable,
   resolveIncognitoOpenClawAgentSqlitePath,
 } from "./openclaw-agent-db.paths.js";
-import {
-  IncognitoSessionEndedError,
-  type AgentDatabaseIncognitoAuthority,
-  type AgentDatabaseIncognitoIdentity,
-  type AgentDatabaseIncognitoOpen,
-  type AgentDatabaseIncognitoOperations,
+import type {
+  AgentDatabaseIncognitoAuthority,
+  AgentDatabaseIncognitoIdentity,
+  AgentDatabaseIncognitoOpen,
+  AgentDatabaseIncognitoOperations,
 } from "./openclaw-agent-execution-contract.js";
 import { runOpenClawAgentWorkerWrite } from "./openclaw-agent-write-admission.js";
 import { registerOpenClawStateDatabaseAsyncResource } from "./openclaw-state-db-cache.js";
 import { captureOpenClawStateReadWorkerContext } from "./openclaw-state-worker-context.js";
 
 type Store = SqliteWorkerStore<AgentDatabaseIncognitoOperations>;
-export type IncognitoAgentDatabaseExecution = {
-  readonly agentId: string;
-  readonly path: string;
-  readonly identity: AgentDatabaseIncognitoIdentity;
-  readonly sessions: ReturnType<ReturnType<typeof createIncognitoSessionFacts>["bind"]>;
+export type IncognitoAgentDatabaseExecution = IncognitoSessionActor & {
   readonly acp: IncognitoAcpSessionAccess;
-  assertCurrent(): void;
   /** Retains the actor across preparation/publication, independently of its writer turn. */
   run<T>(
     authority: AgentDatabaseIncognitoAuthority,
@@ -346,6 +346,45 @@ function createIncognitoAgentExecutionOwner(
           track(track(work), borrowedWork),
         ),
         acp: {
+          prepareEntryRead(params) {
+            const readAuthority = params.authority;
+            const env = cloneEnvWithPlatformSemantics(params.env);
+            env.OPENCLAW_STATE_DIR = resolveStateDir(env);
+            const shared = captureOpenClawStateReadWorkerContext({
+              env,
+              path: params.databasePath ? path.resolve(params.databasePath) : undefined,
+            });
+            const readInput = {
+              cfg: captureRuntimeConfigWithSource(params.cfg, params.cfg),
+              sessionKey: params.sessionKey,
+              env,
+              databasePath: shared.admission.databasePath,
+              storePath: resolveSessionStorePathCore(params.cfg.session?.store, {
+                agentId: execution.agentId,
+                env,
+              }),
+            };
+            const assertReadCurrent = () => {
+              execution.assertCurrent();
+              readAuthority.assertCurrent();
+              shared.maintenanceScope?.assertAdmission();
+              shared.admission.assertCurrent();
+            };
+            assertReadCurrent();
+            return execution.sessions.withSharedState(async () => {
+              const { prepareIncognitoAcpSessionEntryRead } =
+                await import("../acp/runtime/session-meta-worker-mutation.js");
+              assertReadCurrent();
+              return prepareIncognitoAcpSessionEntryRead({
+                ...readInput,
+                actor: execution,
+                authority: {
+                  assertCurrent: assertReadCurrent,
+                  authorize: (stage, facts) => readAuthority.authorize?.(stage, facts),
+                },
+              });
+            });
+          },
           readEntry(params) {
             return execution.sessions.withSharedState(async () => {
               const { readIncognitoAcpSessionEntry } =

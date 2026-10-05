@@ -37,6 +37,7 @@ type SchemaOwner = {
   authorizerActive: boolean;
   scope?: SchemaScope;
   scopeRevision?: number;
+  mutationListeners?: Set<() => void>;
 };
 
 type SchemaScope = { key?: string; revision: number; users: number };
@@ -89,6 +90,9 @@ function publishSchemaChange(database: DatabaseSync, owner: SchemaOwner): void {
 export function invalidateSqliteSchemaFacts(database: DatabaseSync): void {
   const owner = owners.get(database);
   if (owner) {
+    for (const listener of owner.mutationListeners ?? []) {
+      listener();
+    }
     // Capture physical identity before DDL, while the caller owns cleanup on admission failure.
     bindScope(database, owner);
     invalidate(owner);
@@ -97,6 +101,20 @@ export function invalidateSqliteSchemaFacts(database: DatabaseSync): void {
       publishSchemaChange(database, owner);
     }
   }
+}
+
+/** Admission proof is revoked at the same producer boundary as prepared schema facts. */
+export function registerSqliteSchemaMutationListener(
+  database: DatabaseSync,
+  listener: () => void,
+): () => void {
+  const owner = owners.get(database);
+  if (!owner) {
+    throw new Error("SQLite schema observation requires a tracked connection");
+  }
+  const listeners = (owner.mutationListeners ??= new Set());
+  listeners.add(listener);
+  return () => listeners.delete(listener);
 }
 
 // Conservative matching also covers multi-statement migration batches and catalog repairs.
@@ -258,10 +276,21 @@ function trackSchemaChanges(
           owner.mutationDepth += 1;
         }
         try {
-          yield* callStatement(
+          const rows = callStatement(
             iterate ?? native.StatementSync.prototype.iterate.bind(statement),
             bindings,
           );
+          try {
+            yield* rows;
+          } catch (error) {
+            // Delegation does not close the native iterator when next() throws.
+            try {
+              rows.return?.();
+            } catch {
+              // Preserve the statement failure over a failed native reset.
+            }
+            throw error;
+          }
         } finally {
           if (dataChange) {
             owner.mutationDepth -= 1;
@@ -303,6 +332,11 @@ export type SqliteReadOperationRevision = {
   dataVersion: number;
   mutationRevision: number;
 };
+
+/** Local mutation witness only; foreign writers still require their owning admission fence. */
+export function readSqliteNativeMutationRevision(database: DatabaseSync): number | undefined {
+  return owners.get(database)?.mutationRevision;
+}
 
 /** Reuse row facts only inside admitted reads, never during a native write or snapshot. */
 export function getSqliteReadOperationRevision(

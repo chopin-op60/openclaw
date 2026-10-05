@@ -13,6 +13,7 @@ import type {
   IncognitoHistoryOperations,
   IncognitoHistoryTarget,
 } from "../config/sessions/session-incognito-history-contract.js";
+import type { PendingInputHistoryQuery } from "../config/sessions/session-pending-input-history.types.js";
 import type { IncognitoAgentDatabaseExecution } from "../state/openclaw-agent-execution-incognito.js";
 import {
   projectChatDisplayMessagesWithState,
@@ -29,6 +30,7 @@ import type {
   SessionTranscriptReader,
   SubagentCoordinationDisplayResolver,
 } from "./session-transcript-read.types.js";
+import { iterateSessionTranscriptSourcePages } from "./session-transcript-source-pages.js";
 
 type SessionHistorySnapshotOptions = {
   readers: SessionTranscriptReader;
@@ -49,14 +51,18 @@ export async function readSessionHistorySnapshotKernel(
   let transcriptPath: string | undefined;
   let projected: ReturnType<typeof projectChatDisplayMessagesWithState>;
   if (typeof params.limit !== "number") {
-    const snapshot = await options.readers.readSessionMessagesWithSourceAsync(params.target, {
-      mode: "full",
-      reason: "session history cursor pagination",
-      allowResetArchiveFallback: true,
-      readOnly: options.readOnly,
-    });
-    rawMessages = snapshot.messages;
-    transcriptPath = snapshot.transcriptPath;
+    rawMessages = [];
+    for await (const page of iterateSessionTranscriptSourcePages(
+      options.readers.readSessionMessagesWithSourceAsync.bind(options.readers),
+      params.target,
+      {
+        allowResetArchiveFallback: true,
+        readOnly: options.readOnly,
+      },
+    )) {
+      rawMessages.push(...page.messages);
+      transcriptPath = page.transcriptPath;
+    }
     projected = projectChatDisplayMessagesWithState(rawMessages, {
       subagentCoordination: options.readers.subagentCoordination,
       includeCommentaryFallbacks: true,
@@ -210,7 +216,7 @@ export function createIncognitoSessionComputeReader(
 
 /** Inactive composition: callers retain the actor and supply already-prepared display facts. */
 export function createIncognitoSessionHistoryReader(params: {
-  actor: Pick<IncognitoAgentDatabaseExecution, "sessions" | "assertCurrent">;
+  actor: Pick<IncognitoAgentDatabaseExecution, "path" | "sessions" | "assertCurrent">;
   authority: IncognitoSessionAuthority;
   target: IncognitoHistoryTarget & { agentId: string; storePath: string };
   subagentCoordination: SubagentCoordinationDisplayResolver;
@@ -284,17 +290,10 @@ export function createIncognitoSessionHistoryReader(params: {
       );
     },
     async readSessionMessagesWithSourceAsync(scope, options) {
-      const { messages, offPathMessages, transcriptPath } = await read(scope, {
+      return read(scope, {
         type: "session.history.source",
         input: { ...target, options },
       });
-      return disclose({
-        messages: offPathMessages ? [...messages, ...offPathMessages] : messages,
-        transcriptPath,
-      });
-    },
-    async readSessionMessagesAsync(scope, options) {
-      return disclose((await readers.readSessionMessagesWithSourceAsync(scope, options)).messages);
     },
     async readSessionMessagesMatchingIdAsync(scope, messageId) {
       return disclose(
@@ -313,8 +312,27 @@ export function createIncognitoSessionHistoryReader(params: {
     resolveCurrentUserProfileDisplay: params.resolveCurrentUserProfileDisplay,
     resolveCronJobName: params.resolveCronJobName ?? (() => undefined),
   };
+  const pendingInputs = async () => {
+    const { createIncognitoPendingInputHistoryReader } =
+      await import("../config/sessions/session-pending-input-history.js");
+    assertCurrent();
+    return createIncognitoPendingInputHistoryReader({ actor, authority, target });
+  };
   return {
     readers,
+    listPendingInputs(query: Pick<PendingInputHistoryQuery, "limit" | "before"> = {}) {
+      const captured = { ...query };
+      assertCurrent();
+      return actor.sessions.withSharedState(async () =>
+        disclose(await (await pendingInputs()).list(captured)),
+      );
+    },
+    readPendingInput(id: string) {
+      assertCurrent();
+      return actor.sessions.withSharedState(async () =>
+        disclose(await (await pendingInputs()).read(id)),
+      );
+    },
     async rpc(request: ChatHistoryPageParams) {
       const captured = structuredClone(request);
       assertScope({

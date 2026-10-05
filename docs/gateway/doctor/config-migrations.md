@@ -40,8 +40,26 @@ written before the cutoff may be retired together with its Doctor checks.
 When Doctor refuses a retired input, it names an intermediate release to upgrade
 through before retrying. Retirement must leave persisted source data untouched.
 
-Legacy normalization belongs to Doctor and migration owners, with the existing
-backup and verification flow. Runtime readers consume canonical state.
+Except for the deferred readers recorded below, legacy normalization belongs to
+Doctor and migration owners, with the existing backup and verification flow.
+Runtime readers consume canonical state.
+
+### Deferred compaction checkpoints
+
+Keep the runtime readers for session-entry `compactionCheckpoints`, including
+their transcript retention references and historical token metrics. Replacing
+these supported readers with a durable migration would add more than 300 net
+production lines; retain the readers until the format leaves the support window.
+
+The last verified creating release is `v2026.9.3`. Preservation also counts as
+writing: `v2026.9.7` retains existing checkpoints during transcript rewind and
+branch operations. The scheduled retirement date is **January 1, 2027**, subject
+to verifying that no later shipped release writes or preserves the format.
+At that point, delete the readers directly instead of adding a temporary Doctor
+migration. Keep this record current if another preservation writer ships.
+
+Retained transcript nodes with empty entry metadata remain supported runtime
+state; this deferral does not require a Doctor rewrite of those nodes.
 
 ### Workspace setup
 
@@ -176,6 +194,10 @@ Doctor also refuses these retired config inputs:
 - `memorySearch.store.path`, including its agent and `memory.search` forms.
 - `plugins.installs`, `gateway.webchat`, `session.parentForkMaxTokens`,
   `browser.relayBindHost`, and `browser.ssrfPolicy.allowPrivateNetwork`.
+- Extension browser profiles with a legacy `cdpUrl`. Current extension profiles
+  discover their relay endpoint automatically; the extension driver remains supported.
+- The `openai-codex-responses` provider or model API identifier. The intermediate
+  release migrates it to `openai-chatgpt-responses` before the current provider repair.
 - Queue modes `queue`, `steer-backlog`, and `steer+backlog` in `messages.queue.mode`
   or `messages.queue.byChannel`.
 - Top-level `heartbeat`, `routing.allowFrom`, and `routing.groupChat`.
@@ -837,7 +859,6 @@ against the current SQLite owners before the import can rename profiles.
     | `plugins.entries.voice-call.config.streaming.sttProvider`                                        | `plugins.entries.voice-call.config.streaming.provider`                      |
     | `plugins.entries.voice-call.config.streaming.openaiApiKey`/`sttModel`/`silenceDurationMs`/`vadThreshold` | `plugins.entries.voice-call.config.streaming.providers.openai.*`             |
     | `models.providers.*.api: "openai"`                                                               | `"openai-completions"` (gateway startup also skips providers whose `api` is a future/unknown enum value rather than failing closed) |
-    | `browser.profiles.*.driver: "extension"` with a stale `cdpUrl`                                  | driver preserved; stale relay URL removed                                     |
     | `mcp.servers.*.type`, `nodeHost.mcp.servers.*.type` (CLI-native aliases)                           | corresponding `transport` field                                            |
     | `mcp.servers.*.disabled`                                                                         | inverse `mcp.servers.*.enabled`                                              |
     | MCP timeout aliases `connectTimeout`/`connect_timeout`/`timeout`                                 | `connectionTimeoutMs`/`requestTimeoutMs`                                    |

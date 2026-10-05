@@ -13,7 +13,6 @@ import {
 import type { SqliteFileGeneration } from "../infra/sqlite-file-generation.js";
 import { quarantineOrphanedSqliteSidecars } from "../infra/sqlite-files.js";
 import {
-  confirmSqliteFileIntegrity,
   isTerminalSqliteIntegrityError,
   type SqliteIntegrityDiagnostics,
   type SqliteIntegrityOperation,
@@ -60,11 +59,12 @@ import {
   registerOpenClawAgentDatabaseIdentity,
   readOpenClawAgentDatabaseIdentity,
 } from "./openclaw-agent-db-identity.js";
+import { agentDatabaseAdmissionProvenanceRefusal } from "./openclaw-agent-db-lease-provenance.js";
 import {
   hasAgentDatabaseMaintenanceAuthority,
   assertOpenClawAgentDatabaseLease,
   claimOpenClawAgentDatabaseLease,
-  recordOpenClawAgentDatabaseIntegrityVerified,
+  recordOpenClawAgentDatabaseAdmission,
   releaseOpenClawAgentDatabaseLease,
   type OpenClawAgentIntegrityVerificationReceiver,
   type prepareOpenClawAgentDatabaseWorkerLease,
@@ -88,6 +88,7 @@ import { ensureOpenClawAgentDatabasePermissions } from "./openclaw-agent-db-perm
 import { closeIdleOpenClawAgentDatabaseReadOnly } from "./openclaw-agent-db-readonly-scope.js";
 import { registerOpenClawAgentDatabase } from "./openclaw-agent-db-registry.js";
 import {
+  assertAgentDatabaseResourceAdmission,
   matchesAgentDatabaseReadCandidatePath,
   type OpenClawAgentDatabaseReadCandidateResource,
 } from "./openclaw-agent-db-resources.js";
@@ -116,7 +117,7 @@ import {
   resolveOpenClawAgentSqlitePath,
 } from "./openclaw-agent-db.paths.js";
 import { registerOpenClawAgentWalMaintenance } from "./openclaw-agent-db.wal.js";
-import { requestOpenClawAgentDatabaseQuickCheck } from "./openclaw-database-verify.js";
+import { requestOpenClawAgentDatabaseIntegrityCheck } from "./openclaw-database-verify.js";
 import {
   clearOpenClawDatabaseQuarantine,
   readOpenClawDatabaseQuarantineFailure,
@@ -147,16 +148,21 @@ export {
   resolveOpenClawAgentSqlitePath,
 } from "./openclaw-agent-db.paths.js";
 
-/** Reconfirm an advisory worker failure on the live owner connection. */
+/** Drain the live owner before reconfirming an advisory failure in a native child. */
 export async function confirmOpenClawAgentDatabaseIntegrity(
   pathname: string,
+  lifetime?: import("./openclaw-database-verify.impl.js").DatabaseVerifyWorkerLifetime,
 ): Promise<SqliteIntegrityConfirmation> {
   const resolvedPath = path.resolve(pathname);
   await closeOpenClawAgentDatabaseByPathAsync(resolvedPath);
   // Closing breaks process ownership of the pathname. A replacement must
   // revalidate and claim its schema before the path can become trusted again.
   invalidateOpenClawAgentDatabaseValidation(resolvedPath);
-  return confirmSqliteFileIntegrity(resolvedPath, resolvedPath);
+  const { confirmDatabaseVerifyWorker } = await import("./openclaw-database-verify.impl.js");
+  return confirmDatabaseVerifyWorker(
+    { path: resolvedPath, kind: "agent", label: resolvedPath },
+    lifetime,
+  );
 }
 
 /** Latch background verification damage so later opens fail without rescanning. */
@@ -234,6 +240,7 @@ function* openOpenClawAgentDatabaseSteps(
     }
     return opened;
   }
+  assertAgentDatabaseResourceAdmission({ agentId, path: pathname });
   if (!pending) {
     revokePendingAgentDatabaseOpen(pathname);
   }
@@ -320,15 +327,18 @@ function* openOpenClawAgentDatabaseSteps(
   let verification: OpenClawAgentIntegrityVerification | undefined;
   let reuseIntegrity = false;
   let integrityRevoked = false;
+  const diagnostics: SqliteIntegrityDiagnostics = {};
   const validation = pending?.validation ?? preparedLease?.validation;
   const captureVerification: OpenClawAgentIntegrityVerificationReceiver = (
     record,
     runtimeIntegrityAllowed,
     invalidated,
+    because,
   ) => {
     verification = record;
     reuseIntegrity = runtimeIntegrityAllowed;
     integrityRevoked = invalidated;
+    diagnostics.because = invalidated ? because : undefined;
     if (invalidated && validation) {
       // Stale-peer cleanup precedes adoption of proof already transferred by the host.
       Atomics.store(new Int32Array(validation.valid), 0, 0);
@@ -351,7 +361,6 @@ function* openOpenClawAgentDatabaseSteps(
         env: leaseEnvironment,
       });
   }
-  const diagnostics: SqliteIntegrityDiagnostics = {};
   const finishPhase = startAgentDatabaseOpenTiming(
     agentId,
     pathname,
@@ -416,6 +425,9 @@ function* openOpenClawAgentDatabaseSteps(
         validationDatabase,
         { verification, validation, integrityRevoked, reuseIntegrity },
       );
+      diagnostics.because ??= integrityRevoked
+        ? agentDatabaseAdmissionProvenanceRefusal(preparedLease?.provenance, pathname)
+        : undefined;
       const requiresCurrentVersionConvergence = yield* agentDatabaseIntegrityBeforeMutationSteps(
         db,
         agentId,
@@ -423,6 +435,7 @@ function* openOpenClawAgentDatabaseSteps(
         diagnostics,
         verification,
         isValidatedReopen && reuseIntegrity,
+        integrityRevoked && !diagnostics.because,
       );
       assertCurrent(validationDatabase);
       if (!diagnostics.integrityGateOutcome || diagnostics.integrityGateOutcome === "cached") {
@@ -507,23 +520,35 @@ function* openOpenClawAgentDatabaseSteps(
     cache.databases.set(pathname, database);
     const identity = readOpenClawAgentDatabaseIdentity(database).identity;
     assertCurrent(database);
-    if (diagnostics.integrityGateOutcome === "cached" && !(isValidatedReopen && reuseIntegrity)) {
+    const deferred = diagnostics.integrityGateMode === "deferred";
+    if (
+      deferred ||
+      (diagnostics.integrityGateOutcome === "cached" && !(isValidatedReopen && reuseIntegrity))
+    ) {
+      const check = deferred ? "full" : "quick";
       if (preparedLease) {
         requestSqliteWorkerOperationAdmission({
           stage: "prepare",
           facts: {
-            kind: "agent-integrity-cached",
+            kind: "agent-integrity-check",
             lease: preparedLease.receipt,
+            check,
           },
         });
       } else {
-        requestOpenClawAgentDatabaseQuickCheck({ path: pathname, env: leaseEnvironment });
+        requestOpenClawAgentDatabaseIntegrityCheck({
+          path: pathname,
+          env: leaseEnvironment,
+          check,
+        });
       }
-    } else if (diagnostics.integrityGateOutcome !== "cached" && typeof identity === "string") {
-      recordOpenClawAgentDatabaseIntegrityVerified(
+    }
+    if (typeof identity === "string") {
+      recordOpenClawAgentDatabaseAdmission(
         leaseId,
         { agentId, path: pathname, env: leaseEnvironment },
         identity,
+        !deferred && diagnostics.integrityGateOutcome !== "cached",
       );
     }
     refreshAgentDatabaseIdleTimer(database);

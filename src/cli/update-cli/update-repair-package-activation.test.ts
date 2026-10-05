@@ -100,24 +100,80 @@ async function manualInstall(f: Awaited<ReturnType<typeof preparedOwnershipMisma
   return packageActivationIdentity(f.packageRoot, true);
 }
 
+const supersessionReasons = [
+  "superseded-by-manual-install",
+  "recovery-lease-identity-changed",
+  "recovery-lease-missing",
+] as const;
+
+async function obsoleteRecovery(
+  f: Awaited<ReturnType<typeof preparedOwnershipMismatch>>,
+  reason: (typeof supersessionReasons)[number],
+) {
+  if (reason === "superseded-by-manual-install") {
+    return manualInstall(f);
+  }
+  const databasePath = f.descriptor.authority.databasePath;
+  if (reason === "recovery-lease-missing") {
+    fs.unlinkSync(databasePath);
+  } else {
+    fs.renameSync(databasePath, `${databasePath}.previous`);
+    fs.copyFileSync(`${databasePath}.previous`, databasePath);
+    fs.chmodSync(databasePath, 0o600);
+  }
+  return packageActivationIdentity(f.packageRoot, true);
+}
+
 async function repair() {
   await updateRepairCommand({ json: true, yes: true });
 }
 
-describe.skipIf(process.platform === "win32")(
-  "public package repair after manual installation",
-  () => {
-    it("closes the old operation, preserves evidence, and admits the next package preparation", async () => {
-      const f = await preparedOwnershipMismatch();
-      const replacementIdentity = await manualInstall(f);
+describe.skipIf(process.platform === "win32")("public package repair of obsolete recovery", () => {
+  it.each(["current", "legacy launcher group"] as const)(
+    "retires an untouched prepared publication and admits the next update: %s",
+    async (shape) => {
+      const f = shape === "current" ? await fixtures.prepare() : await preparedOwnershipMismatch();
+      mocks.root.mockResolvedValue(f.packageRoot);
+      const prepared = openPackageActivationJournal(f.anchor).read();
+      expect(prepared).toMatchObject({ phase: "prepared", intent: null, publications: [] });
       const launcher = fs.lstatSync(f.launcher);
-      expect(() => assertNoPendingPackageActivation(f.packageRoot)).toThrow("incomplete");
+      const readLauncher = () =>
+        launcher.isSymbolicLink() ? fs.readlinkSync(f.launcher) : fs.readFileSync(f.launcher);
+      const launcherContents = readLauncher();
+      const packageBytes = fs.readFileSync(path.join(f.packageRoot, "package.json"));
+
+      await repair();
+
+      expect(readPackageActivationReceipt(f.packageRoot)).toMatchObject({ phase: "complete" });
+      expect(() => assertNoPendingPackageActivation(f.packageRoot)).not.toThrow();
+      expect(fs.existsSync(f.anchor)).toBe(false);
+      expect(fs.existsSync(resolvePackageActivationHelper(f.anchor))).toBe(false);
+      expect(packageActivationIdentity(f.packageRoot, true)).toBe(
+        prepared.descriptor.previous.identity,
+      );
+      expect(fs.readFileSync(path.join(f.packageRoot, "package.json"))).toEqual(packageBytes);
+      expect(fs.lstatSync(f.launcher).ino).toBe(launcher.ino);
+      expect(readLauncher()).toEqual(launcherContents);
+      expect(defaultRuntime.error).toHaveBeenCalledWith(
+        expect.stringContaining("publication-not-started"),
+      );
+      expect(mocks.finalize).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(supersessionReasons)(
+    "%s preserves evidence and admits the next package preparation",
+    async (reason) => {
+      const f = await preparedOwnershipMismatch();
+      const replacementIdentity = await obsoleteRecovery(f, reason);
+      const launcher = fs.lstatSync(f.launcher);
+      expect(() => assertNoPendingPackageActivation(f.packageRoot)).toThrow();
 
       await repair();
 
       expect(openPackageActivationJournal(f.anchor).read()).toMatchObject({
         phase: "superseded",
-        intent: { kind: "superseded-by-manual-install", replacementIdentity, settled: true },
+        intent: { kind: reason, replacementIdentity, settled: true },
         descriptor: f.descriptor,
       });
       expect(readPackageActivationReceipt(f.packageRoot)).toMatchObject({ phase: "complete" });
@@ -138,10 +194,9 @@ describe.skipIf(process.platform === "win32")(
       expect(defaultRuntime.error).toHaveBeenCalledWith(
         expect.stringContaining(`previous package update operation ${f.operationId}`),
       );
-      expect(vi.mocked(defaultRuntime.error).mock.calls.flat().join("\n")).toContain(
-        "superseded-by-manual-install",
-      );
+      expect(vi.mocked(defaultRuntime.error).mock.calls.flat().join("\n")).toContain(reason);
       expect(mocks.finalize).toHaveBeenCalledOnce();
+      expect(vi.mocked(defaultRuntime.error).mock.calls.flat().join("\n")).toContain(f.retained);
 
       await writePackageRoot(f.params.stage.packageRoot, "4.0.0");
       await fsp.mkdir(f.params.stage.layout.binDir, { recursive: true });
@@ -171,60 +226,110 @@ describe.skipIf(process.platform === "win32")(
       expect(next.phase).toBe("prepared");
       expect(next.descriptor.operationId).not.toBe(f.operationId);
       expect(fs.readFileSync(path.join(f.retained, "recovery.mjs"))).toEqual(f.helperBytes);
-    });
+    },
+  );
 
-    it.each(["previous", "candidate"] as const)(
-      "preserves original recovery when the recorded %s package is still installed",
-      async (selected) => {
-        const f = await preparedOwnershipMismatch();
-        if (selected === "candidate") {
-          fs.renameSync(f.packageRoot, `${f.packageRoot}.previous`);
-          fs.renameSync(path.join(f.anchor, "candidate"), f.packageRoot);
-        }
-        const journal = fs.readFileSync(f.journal);
-
-        await expect(repair()).rejects.toThrow(/publication|recovery/iu);
-
-        expect(fs.readFileSync(f.journal)).toEqual(journal);
-        expect(fs.readFileSync(f.helper)).toEqual(f.helperBytes);
-        expect(fs.existsSync(f.retained)).toBe(false);
-        expect(mocks.finalize).not.toHaveBeenCalled();
-      },
-    );
-
-    it.each(["anchor", "helper"] as const)(
-      "resumes supersession after losing the %s rename acknowledgement",
-      async (boundary) => {
-        const f = await preparedOwnershipMismatch();
-        await manualInstall(f);
-        const rename = fsp.rename.bind(fsp);
-        const interruption = vi
-          .spyOn(fsp, "rename")
-          .mockImplementation(async (source, destination) => {
-            await rename(source, destination);
-            if (source === (boundary === "anchor" ? f.anchor : f.helper)) {
-              throw new Error("archive acknowledgement interrupted");
-            }
-          });
-        await expect(repair()).rejects.toThrow("archive acknowledgement interrupted");
-        interruption.mockRestore();
-        expect(openPackageActivationJournal(f.anchor).read()).toMatchObject({
-          phase: "superseded",
-          intent: { kind: "superseded-by-manual-install", settled: false },
-        });
-        expect(() => assertNoPendingPackageActivation(f.packageRoot)).toThrow();
-
-        await repair();
-
-        expect(readPackageActivationReceipt(f.packageRoot)).toMatchObject({ phase: "complete" });
-        expect(() => assertNoPendingPackageActivation(f.packageRoot)).not.toThrow();
-        expect(fs.readFileSync(path.join(f.retained, "recovery.mjs"))).toEqual(f.helperBytes);
-      },
-    );
-
-    it("does not supersede evidence while another executor owns the installation", async () => {
+  it.each(["previous", "candidate"] as const)(
+    "preserves original recovery when the recorded %s package is still installed",
+    async (selected) => {
       const f = await preparedOwnershipMismatch();
-      await manualInstall(f);
+      if (selected === "candidate") {
+        fs.renameSync(f.packageRoot, `${f.packageRoot}.previous`);
+        fs.renameSync(path.join(f.anchor, "candidate"), f.packageRoot);
+      } else {
+        fs.unlinkSync(f.launcher);
+        fs.symlinkSync("../lib/node_modules/foreign/openclaw.mjs", f.launcher);
+      }
+      const journal = fs.readFileSync(f.journal);
+
+      await expect(repair()).rejects.toThrow(/publication|recovery/iu);
+
+      expect(fs.readFileSync(f.journal)).toEqual(journal);
+      expect(fs.readFileSync(f.helper)).toEqual(f.helperBytes);
+      expect(fs.existsSync(f.retained)).toBe(false);
+      expect(mocks.finalize).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(
+    (["superseded-by-manual-install", "recovery-lease-missing"] as const).flatMap((reason) =>
+      (["anchor", "helper"] as const).map((boundary) => ({ reason, boundary })),
+    ),
+  )(
+    "resumes $reason after losing the $boundary rename acknowledgement",
+    async ({ reason, boundary }) => {
+      const f = await preparedOwnershipMismatch();
+      await obsoleteRecovery(f, reason);
+      const rename = fsp.rename.bind(fsp);
+      const interruption = vi
+        .spyOn(fsp, "rename")
+        .mockImplementation(async (source, destination) => {
+          await rename(source, destination);
+          if (source === (boundary === "anchor" ? f.anchor : f.helper)) {
+            throw new Error("archive acknowledgement interrupted");
+          }
+        });
+      await expect(repair()).rejects.toThrow("archive acknowledgement interrupted");
+      interruption.mockRestore();
+      expect(openPackageActivationJournal(f.anchor).read()).toMatchObject({
+        phase: "superseded",
+        intent: { kind: reason, settled: false },
+      });
+      expect(() => assertNoPendingPackageActivation(f.packageRoot)).toThrow();
+
+      if (reason === "recovery-lease-missing") {
+        // Model inode reuse deterministically, including on filesystems that
+        // happen to allocate a different inode for the recreated lease store.
+        const { descriptor } = openPackageActivationJournal(f.anchor).read();
+        descriptor.authority.databaseIdentity = packageActivationIdentity(
+          descriptor.authority.databasePath,
+          false,
+        );
+        const db = new DatabaseSync(f.journal);
+        try {
+          db.prepare("UPDATE package_activation SET descriptor_json = ?").run(
+            JSON.stringify(descriptor),
+          );
+        } finally {
+          db.close();
+        }
+      }
+
+      await repair();
+
+      expect(openPackageActivationJournal(f.anchor).read().intent).toMatchObject({
+        kind: reason,
+        settled: true,
+      });
+      expect(readPackageActivationReceipt(f.packageRoot)).toMatchObject({ phase: "complete" });
+      expect(() => assertNoPendingPackageActivation(f.packageRoot)).not.toThrow();
+      expect(fs.readFileSync(path.join(f.retained, "recovery.mjs"))).toEqual(f.helperBytes);
+    },
+  );
+
+  it("does not treat a dangling lease database symlink as a missing database", async () => {
+    const f = await preparedOwnershipMismatch();
+    const databasePath = f.descriptor.authority.databasePath;
+    fs.unlinkSync(databasePath);
+    const target = `${databasePath}.absent`;
+    fs.symlinkSync(target, databasePath);
+    const journal = fs.readFileSync(f.journal);
+
+    await expect(repair()).rejects.toThrow(/ENOENT/);
+
+    expect(fs.readlinkSync(databasePath)).toBe(target);
+    expect(fs.existsSync(target)).toBe(false);
+    expect(fs.readFileSync(f.journal)).toEqual(journal);
+    expect(fs.readFileSync(f.helper)).toEqual(f.helperBytes);
+    expect(fs.existsSync(f.retained)).toBe(false);
+    expect(mocks.finalize).not.toHaveBeenCalled();
+  });
+
+  it.each(supersessionReasons)(
+    "does not settle %s while another executor owns the installation",
+    async (reason) => {
+      const f = await preparedOwnershipMismatch();
+      await obsoleteRecovery(f, reason);
       const journal = fs.readFileSync(f.journal);
 
       await withUpdateCommandExecutor(randomUUID(), async (executor) => {
@@ -236,41 +341,39 @@ describe.skipIf(process.platform === "win32")(
       expect(fs.readFileSync(f.helper)).toEqual(f.helperBytes);
       expect(fs.existsSync(f.retained)).toBe(false);
       expect(mocks.finalize).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retains the original replacement fact when the live installation changes during archival", async () => {
+    const f = await preparedOwnershipMismatch();
+    const replacementIdentity = await manualInstall(f);
+    const rename = fsp.rename.bind(fsp);
+    const replacement = vi.spyOn(fsp, "rename").mockImplementation(async (source, destination) => {
+      await rename(source, destination);
+      if (source === f.anchor) {
+        fs.renameSync(f.packageRoot, `${f.packageRoot}.replaced-again`);
+        await writePackageRoot(f.packageRoot, "4.0.0");
+      }
     });
 
-    it("retains the original replacement fact when the live installation changes during archival", async () => {
-      const f = await preparedOwnershipMismatch();
-      const replacementIdentity = await manualInstall(f);
-      const rename = fsp.rename.bind(fsp);
-      const replacement = vi
-        .spyOn(fsp, "rename")
-        .mockImplementation(async (source, destination) => {
-          await rename(source, destination);
-          if (source === f.anchor) {
-            fs.renameSync(f.packageRoot, `${f.packageRoot}.replaced-again`);
-            await writePackageRoot(f.packageRoot, "4.0.0");
-          }
-        });
+    await expect(repair()).rejects.toThrow(/changed/iu);
+    replacement.mockRestore();
 
-      await expect(repair()).rejects.toThrow(/changed/iu);
-      replacement.mockRestore();
-
-      expect(openPackageActivationJournal(f.anchor).read()).toMatchObject({
-        phase: "superseded",
-        intent: { kind: "superseded-by-manual-install", replacementIdentity },
-      });
-      expect(packageActivationIdentity(f.packageRoot, true)).not.toBe(replacementIdentity);
-      expect(fs.readFileSync(path.join(f.packageRoot, "package.json"), "utf8")).toContain("4.0.0");
-      expect(() => assertNoPendingPackageActivation(f.packageRoot)).toThrow();
-      expect(mocks.finalize).not.toHaveBeenCalled();
-
-      await repair();
-
-      expect(openPackageActivationJournal(f.anchor).read()).toMatchObject({
-        phase: "superseded",
-        intent: { kind: "superseded-by-manual-install", replacementIdentity, settled: true },
-      });
-      expect(() => assertNoPendingPackageActivation(f.packageRoot)).not.toThrow();
+    expect(openPackageActivationJournal(f.anchor).read()).toMatchObject({
+      phase: "superseded",
+      intent: { kind: "superseded-by-manual-install", replacementIdentity },
     });
-  },
-);
+    expect(packageActivationIdentity(f.packageRoot, true)).not.toBe(replacementIdentity);
+    expect(fs.readFileSync(path.join(f.packageRoot, "package.json"), "utf8")).toContain("4.0.0");
+    expect(() => assertNoPendingPackageActivation(f.packageRoot)).toThrow();
+    expect(mocks.finalize).not.toHaveBeenCalled();
+
+    await repair();
+
+    expect(openPackageActivationJournal(f.anchor).read()).toMatchObject({
+      phase: "superseded",
+      intent: { kind: "superseded-by-manual-install", replacementIdentity, settled: true },
+    });
+    expect(() => assertNoPendingPackageActivation(f.packageRoot)).not.toThrow();
+  });
+});
