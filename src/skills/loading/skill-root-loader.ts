@@ -25,7 +25,6 @@ import { SKILL_SOURCE_ORIGIN_RELATIVE_PATH } from "./skill-entry-metadata-path.j
 import { createSkillEntry } from "./skill-entry-metadata.js";
 import { createSkillLoadDiagnostics, type SkillLoadDiagnostics } from "./skill-load-diagnostics.js";
 import { compactSkillPath } from "./skill-paths.js";
-import { mergeSkillRecords, type SkillCollision } from "./skill-precedence.js";
 import {
   canonicalSkillDirForSource,
   discoverPluginSkills,
@@ -422,7 +421,6 @@ export function loadWorkspaceSkillSourceEntries(
   plan: WorkspaceSkillSourcePlan,
   diagnostics: ReturnType<typeof createSkillLoadDiagnostics>,
   config?: OpenClawConfig,
-  collisions?: SkillCollision[],
 ): WorkspaceSkillSources["entries"] {
   const grouped = new Map<string, Array<LoadedSkillRecord & { sourceOrder?: number }>>();
   for (const root of plan.roots) {
@@ -458,26 +456,17 @@ export function loadWorkspaceSkillSourceEntries(
         left.skill.name.localeCompare(right.skill.name, "en") ||
         left.skill.source.localeCompare(right.skill.source, "en"),
     );
-  return mergeSkillRecords(
-    ["extra", "bundled", "workshop", "managed", "personal", "workspace"].flatMap(
-      (tier) => grouped.get(tier) ?? [],
-    ),
-    JSON.stringify(["sources", plan.workspaceDir]),
-    collisions,
-  ).map(createSkillEntry);
+  return ["extra", "bundled", "workshop", "managed", "personal", "workspace"]
+    .flatMap((tier) => grouped.get(tier) ?? [])
+    .map(createSkillEntry);
 }
 
 export function loadExecutionSkillEntries(
   executionWorkspaceDir: string,
   diagnostics: ReturnType<typeof createSkillLoadDiagnostics>,
   config?: OpenClawConfig,
-  collisions?: SkillCollision[],
 ): SkillEntry[] {
-  return mergeSkillRecords(
-    resolveWorkspaceSkillDirectories(executionWorkspaceDir).flatMap((root) =>
-      loadSkillRootRecords({ ...root, config, diagnostics }),
-    ),
-    JSON.stringify(["execution", executionWorkspaceDir]),
-    collisions,
-  ).map(createSkillEntry);
+  return resolveWorkspaceSkillDirectories(executionWorkspaceDir)
+    .flatMap((root) => loadSkillRootRecords({ ...root, config, diagnostics }))
+    .map(createSkillEntry);
 }
