@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -40,25 +41,7 @@ type BackupVerifyOptions = {
   json?: boolean;
 };
 
-type BackupVerifyResult = {
-  ok: true;
-  archivePath: string;
-  archiveRoot: string;
-  createdAt: string;
-  runtimeVersion: string;
-  assetCount: number;
-  entryCount: number;
-  symlinkCount: number;
-  sqliteInventoryVerified: boolean;
-  externalSymbolicLinks?: BackupSymbolicLink[];
-};
-
-type PreparedBackupArchive = {
-  result: BackupVerifyResult;
-  hardlinkTargets: ReadonlyMap<string, string>;
-  symbolicLinks: BackupSymbolicLink[];
-  regularFileExtractionBytes: number;
-};
+type BackupVerifyResult = Awaited<ReturnType<typeof verifyBackupArchive>>;
 
 type ArchiveEntry = {
   path: string;
@@ -127,6 +110,9 @@ async function extractManifest(params: {
   const content = await manifestContentPromise;
   if (content instanceof Error) {
     throw content;
+  }
+  if (!isUtf8(content)) {
+    throw new Error("Backup manifest must be valid UTF-8.");
   }
   return content.toString("utf8");
 }
@@ -521,7 +507,7 @@ async function verifySqliteSnapshots(params: {
 async function verifyResolvedBackupArchive(
   archivePath: string,
   requiredSnapshots: readonly BackupSqliteSnapshotFact[],
-): Promise<PreparedBackupArchive> {
+) {
   let archiveStat;
   try {
     archiveStat = await fs.stat(archivePath);
@@ -674,8 +660,8 @@ async function verifyResolvedBackupArchive(
   verifyBackupSqliteCoverage(manifest, requiredSnapshots, verifiedSnapshots);
   const regularFileExtractionBytes = resolveRegularFileExtractionBytes(entries);
 
-  const result: BackupVerifyResult = {
-    ok: true,
+  const result = {
+    ok: true as const,
     archivePath,
     archiveRoot: manifest.archiveRoot,
     createdAt: manifest.createdAt,
@@ -699,7 +685,7 @@ async function verifyResolvedBackupArchive(
 export async function prepareBackupArchive(
   archive: string,
   requiredSnapshots: readonly BackupSqliteSnapshotFact[] = [],
-): Promise<PreparedBackupArchive> {
+) {
   const archivePath = resolveUserPath(archive);
   return await verifyResolvedBackupArchive(archivePath, requiredSnapshots).catch(
     (error: unknown) => {
@@ -713,7 +699,7 @@ export async function prepareBackupArchive(
 export async function verifyBackupArchive(
   archive: string,
   requiredSnapshots: readonly BackupSqliteSnapshotFact[] = [],
-): Promise<BackupVerifyResult> {
+) {
   return (await prepareBackupArchive(archive, requiredSnapshots)).result;
 }
 

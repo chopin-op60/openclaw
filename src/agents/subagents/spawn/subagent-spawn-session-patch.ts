@@ -27,13 +27,13 @@ import type { resolveSpawnAdmission } from "../../spawn-plan.js";
 import type { PreparedSessionPermissionPolicy } from "../../tool-fs-policy.types.js";
 import { captureSpawnParentLineage } from "./spawn-parent-lineage.js";
 import type { SpawnSubagentParams } from "./subagent-spawn-contract.js";
-import { type resolveSubagentModelAndThinkingPlan, splitModelRef } from "./subagent-spawn-plan.js";
+import type { resolveSubagentModelAndThinkingPlan } from "./subagent-spawn-plan.js";
 import {
   loadSessionEntry,
   emitSessionLifecycleEvent,
   resolveGatewaySessionStoreTargetInWorker,
   upsertSessionEntryCore,
-  withSessionEntryReadOnlyInWorker,
+  readSessionEntryReadOnlyInWorker,
 } from "./subagent-spawn.runtime.js";
 
 export async function createInitialSubagentSession(params: {
@@ -71,16 +71,6 @@ export async function createInitialSubagentSession(params: {
   outputSchema?: Record<string, unknown>;
 }): Promise<{ status: "ok"; entry?: SessionEntry } | { status: "error"; error: string }> {
   const { subagentRole, ...admissionPatch } = params.admissionPatch ?? {};
-  const {
-    model: modelRef,
-    modelOverrideSource,
-    modelOverrideFallbackOriginProvider,
-    modelOverrideFallbackOriginModel,
-    ...modelPatch
-  } = params.modelPatch;
-  const { provider, model } = splitModelRef(modelRef);
-  const fallbackOriginProvider = normalizeOptionalString(modelOverrideFallbackOriginProvider);
-  const fallbackOriginModel = normalizeOptionalString(modelOverrideFallbackOriginModel);
   const initialChildSessionPatch: Partial<InternalSessionEntry> = {
     ...admissionPatch,
     ...(subagentRole ? { subagentRole } : {}),
@@ -90,22 +80,7 @@ export async function createInitialSubagentSession(params: {
       : {}),
     ...inheritedToolAllowPatch(params.inheritedToolAllowlist),
     ...inheritedToolDenyPatch(params.inheritedToolDenylist),
-    ...modelPatch,
-    ...(model
-      ? {
-          model,
-          modelOverride: model,
-          modelOverrideSource: modelOverrideSource === "auto" ? "auto" : "user",
-          modelOverrideRouteResolution: "resolved",
-          ...(provider ? { modelProvider: provider, providerOverride: provider } : {}),
-          ...(fallbackOriginProvider && fallbackOriginModel
-            ? {
-                modelOverrideFallbackOriginProvider: fallbackOriginProvider,
-                modelOverrideFallbackOriginModel: fallbackOriginModel,
-              }
-            : {}),
-        }
-      : {}),
+    ...params.modelPatch,
     ...(params.collect ? { swarmCollector: true } : {}),
     ...(params.outputSchema ? { swarmOutputSchema: params.outputSchema } : {}),
     ...(params.incognito ? { incognito: true } : {}),
@@ -141,19 +116,13 @@ export async function createInitialSubagentSession(params: {
     params.assertActive?.();
     // Parent rows are read on the session read worker, never on the Gateway thread.
     const readParentEntry = () =>
-      withSessionEntryReadOnlyInWorker(
+      readSessionEntryReadOnlyInWorker(
         {
           agentId: parentTarget.agentId,
           storePath: parentStorePath,
           sessionKey: parentTarget.canonicalKey,
         },
         () => params.assertActive?.(),
-        async (read) => {
-          if (!read.ok) {
-            throw read.error;
-          }
-          return read.value;
-        },
       );
     const parentEntry = await readParentEntry();
     params.assertActive?.();
@@ -323,7 +292,6 @@ export async function createInitialSubagentSession(params: {
             : {}),
           ...buildSessionCreationStamp({
             via: "spawn",
-            conversationLink: parentEntry?.conversationLink,
             ...params.creationPolicy,
             ...(!params.incognito
               ? {

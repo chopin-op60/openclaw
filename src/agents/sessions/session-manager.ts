@@ -40,6 +40,7 @@ import type { UserTurnTranscriptAdmissionReceipt } from "../../sessions/user-tur
 import { freezeJsonSnapshot } from "../../shared/immutable-data.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
 import { SessionManagerBranching } from "./session-manager-branching.js";
+import { sessionManagerOpenTranscriptCohort } from "./session-manager-core.js";
 import {
   sessionManagerReadInitialContext,
   sessionManagerReadTranscriptStart,
@@ -51,6 +52,7 @@ import {
   readSessionManagerModelContextAsync,
 } from "./session-manager-incognito.js";
 import { receiveSessionManagerCommit } from "./session-manager-persistence-error.js";
+import { openSessionManagerBoundedView } from "./session-manager-reload.js";
 import type {
   SessionLeafControl,
   AppendPersistenceOptions,
@@ -61,6 +63,7 @@ import type {
   SessionManagerBoundedContext,
   SessionManagerBoundedContextLimits,
   SessionManagerPersistenceTarget,
+  SessionManagerTranscriptCohort,
 } from "./session-manager-view-types.js";
 import {
   appendSessionTranscriptNote,
@@ -390,6 +393,11 @@ export class SessionManager extends SessionManagerBranching {
             throw new Error("Transcript rewrite source is not in the loaded view");
           }
           sources.set(destination, source);
+          for (const prefix of publication.cacheTtlProjectionPrefixes ?? []) {
+            if (prefix.anchorIds.includes(sourceId)) {
+              prefix.anchorIds.push(destination);
+            }
+          }
         }
         const first = entries[0];
         const source = first && sources.get(first.id);
@@ -532,6 +540,25 @@ export class SessionManager extends SessionManagerBranching {
   }
 
   /** Reads an existing store's bounded view under the history worker's database custody. */
+  static async [sessionManagerOpenTranscriptCohort](
+    target: SessionTranscriptRuntimeTarget,
+    options: SessionManagerBoundedContextLimits & { cwd?: string; signal?: AbortSignal },
+    selection: SessionManagerTranscriptCohort["selection"],
+    consume: (
+      manager: SessionManager,
+      ...prepared: Parameters<SessionManagerTranscriptCohort["consume"]>
+    ) => void,
+  ): Promise<SessionManager> {
+    return openSessionManagerBoundedView(
+      target,
+      options,
+      (cwd, captured, context, limits) =>
+        new SessionManager(cwd, captured, context.events, { ...context, limits }),
+      { selection, consume, captureView: (manager) => manager.captureTranscriptView() },
+    );
+  }
+
+  /** Reads an existing store's bounded view under the history worker's database custody. */
   static async openBoundedAsync(
     target: SessionTranscriptRuntimeTarget,
     options: SessionManagerBoundedContextLimits & {
@@ -540,35 +567,21 @@ export class SessionManager extends SessionManagerBranching {
       signal?: AbortSignal;
     },
   ): Promise<SessionManager> {
-    const { cwd, onTruncated, signal, ...limits } = options;
-    const fallbackCwd = cwd ?? process.cwd();
-    const hydration = prepareSessionManagerHydration(target, limits, signal);
-    const assertOwned = captureOwnedTranscriptWriteAssertion(hydration.target);
-    assertOwned();
-    const prepared = await hydration.read().catch((error: unknown) => {
-      // Callers may interpret typed absence; that result still needs its live owner.
-      assertOwned();
-      throw error;
-    });
-    signal?.throwIfAborted();
-    assertOwned();
-    hydration.assertCurrent();
-    if (prepared.kind !== "bounded") {
-      throw new Error("Expected a bounded transcript snapshot");
-    }
-    const context = prepared.snapshot;
-    if (context.truncated) {
-      onTruncated?.();
-    }
-    signal?.throwIfAborted();
-    assertOwned();
-    hydration.assertCurrent();
-    const entries = context.events;
-    const header = findSessionTranscriptHeader(entries);
-    return new SessionManager(cwd ?? header?.cwd ?? fallbackCwd, hydration.target, entries, {
-      ...context,
-      limits,
-    });
+    return openSessionManagerBoundedView(
+      target,
+      options,
+      (cwd, captured, context, limits) =>
+        new SessionManager(cwd, captured, context.events, { ...context, limits }),
+    );
+  }
+
+  private static detachBounded(source: SessionManager) {
+    const detached = SessionManager.fromSelectedEntries(
+      [source.getHeader(), ...source.getBranch()],
+      source.getCwd(),
+    );
+    detached.cacheTtlProjectionPrefixes = source.cacheTtlProjectionPrefixes;
+    return detached;
   }
 
   /** Detach the prepared bounded branch without retaining database custody. */
@@ -576,11 +589,7 @@ export class SessionManager extends SessionManagerBranching {
     target: SessionTranscriptRuntimeTarget,
     options: Parameters<typeof SessionManager.openBoundedAsync>[1],
   ): Promise<SessionManager> {
-    const source = await SessionManager.openBoundedAsync(target, options);
-    return SessionManager.fromSelectedEntries(
-      [source.getHeader(), ...source.getBranch()],
-      source.getCwd(),
-    );
+    return SessionManager.detachBounded(await SessionManager.openBoundedAsync(target, options));
   }
 
   /** @deprecated Runtime callers should await openDetachedBoundedAsync. */
@@ -589,12 +598,7 @@ export class SessionManager extends SessionManagerBranching {
     options: Parameters<typeof SessionManager.openBounded>[1],
   ): SessionManager {
     prepareSessionManagerSync("openDetachedBounded", target);
-    const source = SessionManager.openBounded(target, options);
-    // Normalize opaque parents and retained cuts before discarding persistence and bounded state.
-    return SessionManager.fromSelectedEntries(
-      [source.getHeader(), ...source.getBranch()],
-      source.getCwd(),
-    );
+    return SessionManager.detachBounded(SessionManager.openBounded(target, options));
   }
 
   /** @deprecated Await openModelContextAsync. Removal: next Plugin SDK major. */

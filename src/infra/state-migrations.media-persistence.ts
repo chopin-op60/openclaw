@@ -83,6 +83,7 @@ import {
   type PreparedAgentDatabaseMigrationDiscovery,
 } from "./state-migrations.media-persistence-targets.js";
 import { transformMediaArchiveContent } from "./state-migrations.media-persistence-transform.js";
+import { repairDoctorSessionWindowOrphans } from "./state-migrations.session-window-repair.js";
 import {
   MEDIA_ARCHIVE_VERIFICATION_KEY,
   migrateCanonicalTranscriptArchives,
@@ -121,16 +122,6 @@ async function migrateAgentDatabase(params: {
         assertOpenClawAgentDatabaseOwner(database, params);
         assertSupportedAgentSchemaVersion(database, params.pathname);
       },
-    });
-  const migrateArchives = () =>
-    migrateCanonicalTranscriptArchives({
-      agentId: params.agentId,
-      database,
-      pathname: params.pathname,
-      start: { generation: "", sessionId: "" },
-      verification: { key: MEDIA_ARCHIVE_VERIFICATION_KEY, prepared: params.preparedArchives },
-      onArchive: (archivePath) => params.canonicalArchivePaths.add(archivePath),
-      transformContent: transformMediaArchiveContent,
     });
   try {
     configureSqliteMaintenanceCache(database);
@@ -171,7 +162,7 @@ async function migrateAgentDatabase(params: {
         userVersion = readSqliteUserVersion(database);
       }
     };
-    let indexChanges: string[] = [];
+    let integrityChanges: string[] = [];
     try {
       await prepareSchema();
     } catch (error) {
@@ -180,25 +171,33 @@ async function migrateAgentDatabase(params: {
       }
       // Admission already checks the whole file. Only a proven integrity failure
       // needs Doctor's preserving repair scan under an immediate transaction.
-      indexChanges = repairDoctorSqliteIndexCorruption(database, params.pathname, {
+      const assertCurrent = () => {
+        assertAgentDatabaseMaintenanceAuthority(params.maintenance);
+        assertOpenClawAgentDatabaseOwner(database, params);
+      };
+      integrityChanges = repairDoctorSqliteIndexCorruption(database, params.pathname, {
         label: `agent ${params.agentId}`,
-        assertCurrent: () => {
-          assertAgentDatabaseMaintenanceAuthority();
-          assertOpenClawAgentDatabaseOwner(database, params);
-        },
+        assertCurrent,
       });
-      params.changes.push(...indexChanges);
+      if (integrityChanges.length === 0 && userVersion === OPENCLAW_AGENT_SCHEMA_VERSION) {
+        integrityChanges = repairDoctorSessionWindowOrphans(
+          database,
+          params.pathname,
+          assertCurrent,
+        );
+      }
+      params.changes.push(...integrityChanges);
       await prepareSchema();
     }
     if (
-      indexChanges.length > 0 ||
+      integrityChanges.length > 0 ||
       agentDatabaseLifecycle.terminal.peek(params.pathname) ||
       readOpenClawDatabaseQuarantineFailure("agent", params.pathname, { env: params.env })
     ) {
       runSqliteImmediateTransactionSync(
         database,
         () => {
-          if (indexChanges.length === 0) {
+          if (integrityChanges.length === 0) {
             assertSqliteIntegrity(database, params.pathname);
           }
           assertAgentDatabaseMaintenanceAuthority();
@@ -335,7 +334,16 @@ async function migrateAgentDatabase(params: {
         );
       }
     }
-    const archives = await migrateArchives();
+    const archives = await migrateCanonicalTranscriptArchives({
+      agentId: params.agentId,
+      database,
+      pathname: params.pathname,
+      signal: params.maintenance.signal,
+      start: { generation: "", sessionId: "" },
+      verification: { key: MEDIA_ARCHIVE_VERIFICATION_KEY, prepared: params.preparedArchives },
+      onArchive: (archivePath) => params.canonicalArchivePaths.add(archivePath),
+      transformContent: transformMediaArchiveContent,
+    });
     refreshSqlitePlannerStatistics(database);
     return {
       ...rewritten,
@@ -421,6 +429,8 @@ export async function migrateLegacyMediaPersistence(
     env?: NodeJS.ProcessEnv;
   } = {},
 ): Promise<MigrationMessages> {
+  const inspectionSignal = resolveSqliteInspectionSignal();
+  inspectionSignal?.throwIfAborted();
   const env = params.env ?? process.env;
   const changes: string[] = [];
   const warnings: string[] = [];
@@ -522,6 +532,9 @@ export async function migrateLegacyMediaPersistence(
             );
           }
         } catch (error) {
+          if (inspectionSignal?.aborted && error === inspectionSignal.reason) {
+            throw error;
+          }
           // An unverified database may own files in this directory. Never fall
           // back to file-only repair after its canonical archive repair refuses.
           refusedArchiveDirectories.add(
@@ -562,6 +575,9 @@ export async function migrateLegacyMediaPersistence(
               changes.push(`Migrated archived transcript media in ${archive}.`);
             }
           } catch (error) {
+            if (inspectionSignal?.aborted && error === inspectionSignal.reason) {
+              throw error;
+            }
             warnings.push(
               `Skipped archived transcript media migration for ${archive}: ${String(error)}`,
             );
@@ -574,6 +590,9 @@ export async function migrateLegacyMediaPersistence(
       );
     });
   } catch (error) {
+    if (inspectionSignal?.aborted && error === inspectionSignal.reason) {
+      throw error;
+    }
     warnings.push(`Agent database maintenance deferred: ${formatErrorMessage(error)}`);
   }
   return {

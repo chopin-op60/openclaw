@@ -7,6 +7,7 @@ import type {
   ToolCall,
 } from "@openclaw/llm-core";
 import { appendAssistantThinking } from "@openclaw/llm-core/event-stream";
+import { asPositiveFiniteNumber } from "@openclaw/normalization-core/number-coercion";
 import { readNonEmptyStringPreservingWhitespace } from "@openclaw/normalization-core/string-coerce";
 import type { ChatCompletionChunk } from "openai/resources/chat/completions.js";
 import type { OpenAICompletionsOptions } from "../provider-options.js";
@@ -14,6 +15,7 @@ import {
   createOpenAICompletionsToolCallDeltaNormalizer,
   createOpenAIEncryptedToolCallReasoningTracker,
   finalizeOpenAICompletionsToolCalls,
+  hasOpenAICompletionsDeltaContent,
 } from "../providers/openai-completions-tool-calls.js";
 import { mapOpenAIStopReason } from "../providers/openai-stop-reason.js";
 import {
@@ -33,6 +35,7 @@ import { notifyLlmRequestActivity } from "../utils/llm-request-activity.js";
 import { createReasoningTagTextPartitioner } from "../utils/reasoning-tag-text-partitioner.js";
 import { withFirstStreamEventTimeout } from "../utils/stream-first-event-timeout.js";
 import { createDeepSeekTextFilter } from "./deepseek-text-filter.js";
+import { detectOpenAICompletionsCompat } from "./openai-completions-compat.js";
 import {
   createDsmlRecoverer,
   type DeepSeekDsmlRecoveredPart,
@@ -41,6 +44,7 @@ import {
 import { getCompat } from "./openai-transport-params.js";
 import {
   isOpenAICompletionsThinkingEnabled,
+  log,
   parseOpenAICompletionsUsage,
   readOpenAICompletionsContentDeltas,
   readOpenAICompletionsReasoningBatch,
@@ -106,7 +110,8 @@ export async function processCompletionsStream(
   const MAX_POST_TOOL_CALL_BUFFER_BYTES = 256_000;
   const directMode = options?.mode === "direct";
   const emitReasoning = options?.emitReasoning ?? true;
-  const compat = getCompat(model as OpenAIModeModel);
+  const openAIModel = model as OpenAIModeModel;
+  const compat = getCompat(openAIModel);
   const visibleReasoningDetailTypes = new Set(compat.visibleReasoningDetailTypes);
   const shouldFilterDeepSeekDsmlText = !directMode && compat.thinkingFormat === "deepseek";
   const deepSeekTextFilter = shouldFilterDeepSeekDsmlText ? createDeepSeekTextFilter() : null;
@@ -165,7 +170,8 @@ export async function processCompletionsStream(
     }
     previous.text += next.text;
   };
-  const appendThinkingDeltaInternal = (reasoningDelta: { signature?: string; text: string }) => {
+  const appendThinkingDelta = (reasoningDelta: { signature?: string; text: string }) => {
+    flushPendingPostToolCallDeltas();
     if (directMode && directThinkingBlock) {
       currentBlock = directThinkingBlock;
     }
@@ -193,7 +199,8 @@ export async function processCompletionsStream(
       partial: output,
     });
   };
-  const appendTextDeltaInternal = (text: string, source?: OpenAICompletionsTextSource) => {
+  const appendTextDelta = (text: string, source?: OpenAICompletionsTextSource) => {
+    flushPendingPostToolCallDeltas();
     if (directMode && directTextBlock) {
       currentBlock = directTextBlock;
     }
@@ -232,23 +239,16 @@ export async function processCompletionsStream(
       return;
     }
     const bufferedDeltas = pendingPostToolCallDeltas;
+    // Detach the buffer so each append below sees an empty queue.
     pendingPostToolCallDeltas = [];
     pendingPostToolCallBytes = 0;
     for (const delta of bufferedDeltas) {
       if (delta.kind === "text") {
-        appendTextDeltaInternal(delta.text, delta.source);
+        appendTextDelta(delta.text, delta.source);
       } else if (emitReasoning) {
-        appendThinkingDeltaInternal(delta);
+        appendThinkingDelta(delta);
       }
     }
-  };
-  const appendThinkingDelta = (reasoningDelta: { signature?: string; text: string }) => {
-    flushPendingPostToolCallDeltas();
-    appendThinkingDeltaInternal(reasoningDelta);
-  };
-  const appendTextDelta = (text: string, source?: OpenAICompletionsTextSource) => {
-    flushPendingPostToolCallDeltas();
-    appendTextDeltaInternal(text, source);
   };
   const appendVisibleTextDelta = (text: string) => {
     if (!text) {
@@ -281,8 +281,7 @@ export async function processCompletionsStream(
     }
   };
   const appendRecoveredToolCall = (toolCall: RecoveredDeepSeekDsmlToolCall) => {
-    const switchingToolCall = currentBlock?.type === "toolCall";
-    if (switchingToolCall) {
+    if (currentBlock?.type === "toolCall") {
       currentBlock = null;
       flushPendingPostToolCallDeltas();
     }
@@ -403,8 +402,6 @@ export async function processCompletionsStream(
     if (!rawChunk || typeof rawChunk !== "object") {
       continue;
     }
-    // Hidden reasoning is still provider progress; keep the idle watchdog alive without exposing it.
-    notifyLlmRequestActivity(options?.signal);
     const chunk = rawChunk as OpenAICompatibleChatCompletionChunk;
     output.responseId ||= chunk.id;
     // Retain the provider-returned model when it differs from the requested id so
@@ -413,24 +410,30 @@ export async function processCompletionsStream(
     if (typeof chunk.model === "string" && chunk.model.length > 0 && chunk.model !== model.id) {
       output.responseModel ||= chunk.model;
     }
-    let hasReasoningUsageActivity = false;
-    if (chunk.usage) {
-      output.usage = parseOpenAICompletionsUsage(chunk.usage, model, {
+    const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+    const usage = chunk.usage || choice?.usage;
+    const hasReasoningUsageActivity = Boolean(
+      asPositiveFiniteNumber(usage?.completion_tokens_details?.reasoning_tokens),
+    );
+    if (usage) {
+      output.usage = parseOpenAICompletionsUsage(usage, model, {
         includeReasoningTokens: !directMode,
       });
-      hasReasoningUsageActivity = hasOpenAICompletionsReasoningUsageActivity(chunk.usage);
     }
-    const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+    const rawChoiceDelta = choice?.delta ?? choice?.message;
+    // Classify before legacy-tool buffering and hidden-reasoning display filtering.
+    notifyLlmRequestActivity(
+      options?.signal,
+      Boolean(
+        usage ||
+        choice?.finish_reason ||
+        (rawChoiceDelta &&
+          (rawChoiceDelta.tool_calls?.length || hasOpenAICompletionsDeltaContent(rawChoiceDelta))),
+      ),
+    );
     if (!choice) {
       emitReasoningUsageActivity(hasReasoningUsageActivity);
       continue;
-    }
-    const choiceUsage = choice.usage;
-    if (!chunk.usage && choiceUsage) {
-      output.usage = parseOpenAICompletionsUsage(choiceUsage, model, {
-        includeReasoningTokens: !directMode,
-      });
-      hasReasoningUsageActivity = hasOpenAICompletionsReasoningUsageActivity(choiceUsage);
     }
     if (choice.finish_reason) {
       const finishReasonResult = mapOpenAIStopReason(choice.finish_reason, {
@@ -442,7 +445,6 @@ export async function processCompletionsStream(
         output.errorMessage = finishReasonResult.errorMessage;
       }
     }
-    const rawChoiceDelta = choice.delta ?? choice.message;
     if (!rawChoiceDelta) {
       emitReasoningUsageActivity(hasReasoningUsageActivity);
       continue;
@@ -507,8 +509,7 @@ export async function processCompletionsStream(
             block = toolCallBlocksById.get(toolCall.id);
           }
           if (!block) {
-            const switchingToolCall = currentBlock?.type === "toolCall";
-            if (switchingToolCall) {
+            if (currentBlock?.type === "toolCall") {
               currentBlock = null;
               flushPendingPostToolCallDeltas();
             }
@@ -639,6 +640,39 @@ export async function processCompletionsStream(
   if (output.stopReason === "toolUse") {
     tagPendingCommentaryText(output.content);
   }
+  if (
+    !output.usage.contextUsage &&
+    !options?.signal?.aborted &&
+    output.stopReason !== "error" &&
+    output.stopReason !== "aborted"
+  ) {
+    output.usage.contextUsage = { state: "unavailable" };
+    if (!compat.supportsUsageInStreaming) {
+      warnMissingStreamingUsage(openAIModel);
+    }
+  }
+}
+
+// One hint per provider/model per process, capped so a long-lived Gateway that
+// cycles through many custom models cannot grow the memo without bound.
+const MAX_MISSING_USAGE_HINT_KEYS = 256;
+const missingUsageHintKeys = new Set<string>();
+
+function warnMissingStreamingUsage(model: OpenAIModeModel) {
+  if (detectOpenAICompletionsCompat(model).capabilities.endpointClass !== "custom") {
+    return;
+  }
+  const key = `${model.provider}/${model.id}`;
+  if (missingUsageHintKeys.has(key) || missingUsageHintKeys.size >= MAX_MISSING_USAGE_HINT_KEYS) {
+    return;
+  }
+  missingUsageHintKeys.add(key);
+  log.warn(
+    `${key} returned no token usage; context size is estimated and token accounting is unavailable. ` +
+      "If this endpoint supports stream_options.include_usage, set compat.supportsUsageInStreaming: true " +
+      `on the model in models.providers.${model.provider}.models.`,
+    { provider: model.provider, model: model.id },
+  );
 }
 
 export function shouldEmitOpenAICompletionsReasoning(
@@ -650,13 +684,4 @@ export function shouldEmitOpenAICompletionsReasoning(
   }
   const effort = options?.reasoningEffort ?? options?.reasoning ?? "high";
   return Boolean(effort) && isOpenAICompletionsThinkingEnabled(effort);
-}
-
-function hasOpenAICompletionsReasoningUsageActivity(
-  rawUsage: NonNullable<ChatCompletionChunk["usage"]>,
-) {
-  const reasoningTokens = rawUsage.completion_tokens_details?.reasoning_tokens;
-  return (
-    typeof reasoningTokens === "number" && Number.isFinite(reasoningTokens) && reasoningTokens > 0
-  );
 }

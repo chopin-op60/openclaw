@@ -35,7 +35,8 @@ import { readAgentDatabaseAdmissionRefusal } from "../state/agent-database-admis
 import { createRetainedAgentDatabaseMatcher } from "../state/agent-deletion-discovery.js";
 import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.js";
 import { tableExists, tableHasColumn } from "../state/openclaw-state-db-schema-helpers.js";
-import { openNodeSqliteDatabase } from "./node-sqlite.js";
+import { executeSqliteQuerySync } from "./kysely-sync.js";
+import { openSqliteReadOnlyDatabase } from "./sqlite-snapshot-source.js";
 
 type SessionStoreTarget = ResolvedSessionStoreTarget & { sqlitePath?: string };
 
@@ -45,6 +46,7 @@ export type ReadOnlySqliteValidationSnapshot = {
   sessionIdsBySessionKey: ReadonlyMap<string, string>;
   sessionKeysBySessionId: ReadonlyMap<string, string>;
   transcriptEventCountsBySessionId: ReadonlyMap<string, number>;
+  archivedSessionIds: ReadonlySet<string>;
 };
 
 type ReadOnlySqliteResult<T> = { ok: true; value: T } | { error: unknown; ok: false };
@@ -366,6 +368,7 @@ export function readOnlySqliteValidationSnapshot(
     sessionIdsBySessionKey: new Map(),
     sessionKeysBySessionId: new Map(),
     transcriptEventCountsBySessionId: new Map(),
+    archivedSessionIds: new Set(),
   };
   const result = readSessionDatabase(target, (database) => {
     const projection = resolveSessionIdentityProjection(database);
@@ -402,10 +405,26 @@ export function readOnlySqliteValidationSnapshot(
         }
       }
     }
+    const archivedSessionIds = new Set<string>();
+    const query = getSessionKysely(database);
+    for (const table of [
+      "session_transcript_archives",
+      "session_transcript_cold_archives",
+    ] as const) {
+      if (tableExists(database, table)) {
+        for (const row of executeSqliteQuerySync(
+          database,
+          query.selectFrom(table).select("session_id"),
+        ).rows) {
+          archivedSessionIds.add(row.session_id);
+        }
+      }
+    }
     return {
       sessionIdsBySessionKey,
       sessionKeysBySessionId,
       transcriptEventCountsBySessionId,
+      archivedSessionIds,
     };
   });
   return result.ok ? { ok: true, snapshot: result.value ?? empty } : result;
@@ -446,7 +465,7 @@ function readSessionDatabase<T>(
   }
   let database: DatabaseSync | undefined;
   try {
-    database = openNodeSqliteDatabase(sqlitePath, { readOnly: true });
+    database = openSqliteReadOnlyDatabase(sqlitePath, { readOnly: true });
     return { ok: true, value: read(database) };
   } catch (error) {
     return { error, ok: false };
@@ -482,7 +501,7 @@ export function readOnlySqliteDbStats(target: SessionStoreTarget): ReadOnlySqlit
   }
   let database: DatabaseSync | undefined;
   try {
-    database = openNodeSqliteDatabase(sqlitePath, { readOnly: true });
+    database = openSqliteReadOnlyDatabase(sqlitePath, { readOnly: true });
     const hasTranscriptEvents = tableExists(database, "transcript_events");
     const integrityRow = database.prepare("PRAGMA quick_check").get();
     let totalRow: { row_bytes?: unknown } | undefined;

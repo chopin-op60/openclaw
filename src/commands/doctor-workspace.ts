@@ -82,22 +82,9 @@ export async function shouldSuggestMemorySystem(workspaceDir: string): Promise<b
   return true;
 }
 
-type RootMemoryFilesDetection = {
-  workspaceDir: string;
-  canonicalPath: string;
-  legacyPath: string;
-  canonicalExists: boolean;
-  legacyExists: boolean;
-  canonicalBytes?: number;
-  legacyBytes?: number;
-};
+type RootMemoryStatResult = Awaited<ReturnType<typeof statIfExists>>;
 
-type RootMemoryStatResult = {
-  exists: boolean;
-  bytes?: number;
-};
-
-async function statIfExists(filePath: string): Promise<RootMemoryStatResult> {
+async function statIfExists(filePath: string) {
   try {
     const stat = await fs.promises.stat(filePath);
     if (!stat.isFile()) {
@@ -123,7 +110,7 @@ async function listWorkspaceEntries(workspaceDir: string): Promise<Set<string>> 
   }
 }
 
-async function detectRootMemoryFiles(workspaceDir: string): Promise<RootMemoryFilesDetection> {
+async function detectRootMemoryFiles(workspaceDir: string) {
   const resolvedWorkspace = path.resolve(workspaceDir);
   const canonicalPath = resolveCanonicalRootMemoryPath(resolvedWorkspace);
   const legacyPath = resolveLegacyRootMemoryPath(resolvedWorkspace);
@@ -149,20 +136,6 @@ async function detectRootMemoryFiles(workspaceDir: string): Promise<RootMemoryFi
 
 function formatBytes(bytes?: number): string {
   return typeof bytes === "number" ? `${bytes} bytes` : "size unknown";
-}
-
-function formatRootMemoryFilesWarning(detection: RootMemoryFilesDetection): string | null {
-  if (detection.canonicalExists && detection.legacyExists) {
-    return [
-      "Split root durable memory files detected:",
-      `- canonical: ${shortenHomePath(detection.canonicalPath)} (${formatBytes(detection.canonicalBytes)})`,
-      `- legacy: ${shortenHomePath(detection.legacyPath)} (${formatBytes(detection.legacyBytes)})`,
-      `OpenClaw uses ${CANONICAL_ROOT_MEMORY_FILENAME} as the canonical durable memory file.`,
-      `Dreaming writes durable promotions to ${CANONICAL_ROOT_MEMORY_FILENAME}, so older facts in ${LEGACY_ROOT_MEMORY_FILENAME} can be shadowed.`,
-      `Run "openclaw doctor --fix" to merge the legacy file into ${CANONICAL_ROOT_MEMORY_FILENAME} with a backup.`,
-    ].join("\n");
-  }
-  return null;
 }
 
 type RootMemoryMigrationResult = {
@@ -240,18 +213,14 @@ async function migrateLegacyRootMemoryFile(
       readError: !isTooLarge,
     };
   };
+  const readMemoryFile = (filePath: string) =>
+    readRegularFile({ filePath, maxBytes: ROOT_MEMORY_FILE_MAX_BYTES });
   try {
     // Reject oversized, unreadable, symlinked, or non-regular inputs before the
     // archive rename. The archived snapshot is read again after the atomic move.
     await Promise.all([
-      readRegularFile({
-        filePath: detection.canonicalPath,
-        maxBytes: ROOT_MEMORY_FILE_MAX_BYTES,
-      }),
-      readRegularFile({
-        filePath: detection.legacyPath,
-        maxBytes: ROOT_MEMORY_FILE_MAX_BYTES,
-      }),
+      readMemoryFile(detection.canonicalPath),
+      readMemoryFile(detection.legacyPath),
     ]);
   } catch (err) {
     return skippedForReadFailure(err);
@@ -269,14 +238,8 @@ async function migrateLegacyRootMemoryFile(
   let legacyText: string;
   try {
     [canonicalText, legacyText] = await Promise.all([
-      readRegularFile({
-        filePath: detection.canonicalPath,
-        maxBytes: ROOT_MEMORY_FILE_MAX_BYTES,
-      }).then(({ buffer }) => buffer.toString("utf-8")),
-      readRegularFile({
-        filePath: archivedLegacyPath,
-        maxBytes: ROOT_MEMORY_FILE_MAX_BYTES,
-      }).then(({ buffer }) => buffer.toString("utf-8")),
+      readMemoryFile(detection.canonicalPath).then(({ buffer }) => buffer.toString("utf-8")),
+      readMemoryFile(archivedLegacyPath).then(({ buffer }) => buffer.toString("utf-8")),
     ]);
   } catch (err) {
     const skipped = skippedForReadFailure(err);
@@ -314,10 +277,16 @@ type WorkspaceMemoryDoctorScope = {
 
 export async function noteWorkspaceMemoryHealth(scope: WorkspaceMemoryDoctorScope): Promise<void> {
   try {
-    const rootMemoryWarning = formatRootMemoryFilesWarning(
-      await detectRootMemoryFiles(scope.workspaceDir),
-    );
-    if (rootMemoryWarning) {
+    const detection = await detectRootMemoryFiles(scope.workspaceDir);
+    if (detection.canonicalExists && detection.legacyExists) {
+      const rootMemoryWarning = [
+        "Split root durable memory files detected:",
+        `- canonical: ${shortenHomePath(detection.canonicalPath)} (${formatBytes(detection.canonicalBytes)})`,
+        `- legacy: ${shortenHomePath(detection.legacyPath)} (${formatBytes(detection.legacyBytes)})`,
+        `OpenClaw uses ${CANONICAL_ROOT_MEMORY_FILENAME} as the canonical durable memory file.`,
+        `Dreaming writes durable promotions to ${CANONICAL_ROOT_MEMORY_FILENAME}, so older facts in ${LEGACY_ROOT_MEMORY_FILENAME} can be shadowed.`,
+        `Run "openclaw doctor --fix" to merge the legacy file into ${CANONICAL_ROOT_MEMORY_FILENAME} with a backup.`,
+      ].join("\n");
       note(
         `${scope.labelAgent ? `Agent "${scope.agentId}":\n` : ""}${rootMemoryWarning}`,
         "Workspace memory",
@@ -351,10 +320,14 @@ export async function maybeRepairWorkspaceMemoryHealth(params: {
       return;
     }
     const migration = await migrateLegacyRootMemoryFile(params.scope.workspaceDir);
-    if (migration.readLimitExceeded || migration.readError) {
-      const reason = migration.readLimitExceeded
-        ? "a file exceeded the safe read limit"
-        : "a file could not be read";
+    const reason = migration.readLimitExceeded
+      ? "a file exceeded the safe read limit"
+      : migration.readError
+        ? "a file could not be read"
+        : migration.archiveError
+          ? "legacy memory could not be archived atomically"
+          : null;
+    if (reason) {
       note(
         [
           `${prefix}Workspace memory root repair skipped (${reason}):`,
@@ -366,17 +339,6 @@ export async function maybeRepairWorkspaceMemoryHealth(params: {
         ]
           .filter((line): line is string => Boolean(line))
           .join("\n"),
-        "Doctor changes",
-      );
-      return;
-    }
-    if (migration.archiveError) {
-      note(
-        [
-          `${prefix}Workspace memory root repair skipped (legacy memory could not be archived atomically):`,
-          `- canonical: ${migration.canonicalPath}`,
-          `- legacy: ${migration.legacyPath}`,
-        ].join("\n"),
         "Doctor changes",
       );
       return;

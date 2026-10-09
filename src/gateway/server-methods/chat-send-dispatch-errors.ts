@@ -16,7 +16,7 @@ import { SessionMutationAuthorizationChangedError } from "../session-mutation-au
 import { tryResolveSessionCompatibilityOwnerAgentId } from "../session-request-agent.js";
 import { formatForLog } from "../ws-log.js";
 import { buildAbortedChatSendPayload } from "./chat-abort-authorization.js";
-import { broadcastChatError, broadcastChatFinal } from "./chat-broadcast.js";
+import { broadcastChatError } from "./chat-broadcast.js";
 import type { RestartSafeChatTerminalState } from "./chat-restart-recovery.js";
 import type { AdmittedChatSend } from "./chat-send-admission.js";
 import {
@@ -70,7 +70,7 @@ type ChatSendJobAdmission = Pick<
 > & {
   sessionBinding: Pick<
     AdmittedChatSend["sessionBinding"],
-    "sessionKey" | "sessionId" | "agentId" | "lifecycleGeneration"
+    "sessionKey" | "sessionId" | "agentId" | "lifecycleGeneration" | "terminalOutcomeObserved"
   >;
 };
 
@@ -154,6 +154,7 @@ export async function handleChatSendSetupError(params: {
   params.respond(false, payload, error, { runId: clientRunId, error: formatForLog(params.error) });
   if (!hidden && failureDisposition !== "client-retry") {
     broadcastChatError({
+      terminalEntry: jobSessionBinding,
       context: params.context,
       runId: clientRunId,
       sessionKey,
@@ -170,7 +171,6 @@ export function createChatSendDispatchErrorLifecycle(params: {
   context: GatewayRequestContext;
   isAgentRunStarted: () => boolean;
   isQueuedFollowupEnqueued: () => boolean;
-  isQueuedFollowupCompleted?: () => boolean;
   classifyFailure?: (error: unknown) => AcceptedChatSendFailureDisposition;
   isReplyDispatchRun?: () => boolean;
   persistUserTurnTranscript: () => Promise<unknown>;
@@ -215,27 +215,6 @@ export function createChatSendDispatchErrorLifecycle(params: {
       context.logGateway.warn(
         `webchat dispatch failed after followup queue admission: ${formatForLog(err)}`,
       );
-      if (!context.chatRunState.hasAbortMarker(clientRunId)) {
-        setGatewayDedupeEntry({
-          dedupe: context.dedupe,
-          key: `chat:${clientRunId}`,
-          session: captureAgentJobSession(jobSessionBinding),
-          entry: {
-            ts: Date.now(),
-            ok: true,
-            payload: {
-              runId: clientRunId,
-              status: params.isQueuedFollowupCompleted?.() ? "completed" : "ok",
-            },
-          },
-        });
-        broadcastChatFinal({
-          context,
-          runId: clientRunId,
-          sessionKey,
-          agentId,
-        });
-      }
       return;
     }
 
@@ -345,6 +324,7 @@ export function createChatSendDispatchErrorLifecycle(params: {
         });
         if (!hidden) {
           broadcastChatError({
+            terminalEntry: jobSessionBinding,
             context,
             runId: clientRunId,
             sessionKey,
@@ -369,7 +349,10 @@ export function createChatSendDispatchErrorLifecycle(params: {
     // Commands and reply-dispatch runtimes have already published their terminal.
     // Native agent events keep ownership until their own terminal delivery completes.
     const clearRun = () => {
-      if (!params.isAgentRunStarted() || params.isReplyDispatchRun?.()) {
+      if (
+        !isQueuedFollowupEnqueued() &&
+        (!params.isAgentRunStarted() || params.isReplyDispatchRun?.())
+      ) {
         context.chatRunState.clearRun(clientRunId);
         context.agentRunSeq.delete(clientRunId);
       }

@@ -10,7 +10,6 @@ import {
   openOpenClawStateDatabase,
 } from "../../state/openclaw-state-db.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
-import * as stateWorker from "../../state/openclaw-state-worker-store.js";
 import {
   observeMainThreadReads,
   observeMainThreadSql,
@@ -22,24 +21,46 @@ import {
 } from "./errors.js";
 import { insertRegistryWorktreeProvisionedChunk } from "./provisioned-snapshot.test-support.js";
 import {
+  captureWorktreeRegistryReadGuard,
+  prepareWorktreeRegistryGuard,
+  readLiveRegistryWorktreeByOwner,
+  readRegistryWorktree,
+} from "./registry-read.js";
+import {
   abortWorktreeRemovalRow,
   claimWorktreeRemovalRow,
   clearRegistryWorktreeProvisionedChunks,
   finalizeWorktreeRemovalRows,
-  getRegistryWorktree,
   insertRegistryWorktree,
   WorktreeRemovalContentionError,
   updateRegistryWorktree,
 } from "./registry.js";
+import { getRegistryWorktree } from "./registry.test-support.js";
 import { withWorktreeRunEnd, prepareWorktreeRunEndClose } from "./run-end-lifecycle.js";
 import { admitWorktreeRunLeaseRowAsync } from "./run-lease-store.js";
 import {
   materializeManagedWorktreeFixture,
   useManagedWorktreeTestRepository,
 } from "./service.test-support.js";
+import { interceptWorktreeWorkerOperation } from "./worker-operation.test-support.js";
 
 const dirs = useAutoCleanupTempDirTracker(afterEach);
 const initializeRepository = useManagedWorktreeTestRepository();
+
+function interceptAdmission(
+  intercept: (request: admissions.SqliteWorkerAdmissionRequest, admit: () => void) => void,
+) {
+  const createAdmission = admissions.createSqliteWorkerOperationAdmission;
+  return vi
+    .spyOn(admissions, "createSqliteWorkerOperationAdmission")
+    .mockImplementation((handler, ...options) =>
+      createAdmission(
+        (request, grant) => intercept(request, () => handler(request, grant)),
+        ...options,
+      ),
+    );
+}
+
 afterEach(async () => {
   vi.restoreAllMocks();
   await closeOpenClawStateDatabaseAsync();
@@ -47,7 +68,7 @@ afterEach(async () => {
 });
 
 it("joins schema-wrapped work and keeps sibling and successor Gateway lifetimes open", async () => {
-  const { env, database } = fixture();
+  const { env, database } = await fixture();
   vi.stubEnv("OPENCLAW_STATE_DIR", env.OPENCLAW_STATE_DIR);
   const first = withExistingOpenClawStateSchema({ path: database.path }, () =>
     prepareWorktreeRunEndClose(),
@@ -77,11 +98,11 @@ it("joins schema-wrapped work and keeps sibling and successor Gateway lifetimes 
   );
 });
 
-function fixture() {
+async function fixture() {
   const root = dirs.make("worktree-run-end-worker-");
   const env = { ...process.env, OPENCLAW_STATE_DIR: root };
   const database = openOpenClawStateDatabase({ env });
-  insertRegistryWorktree(env, {
+  await insertRegistryWorktree(env, {
     id: "synthetic",
     name: "synthetic",
     repoFingerprint: "0123456789abcdef",
@@ -90,6 +111,7 @@ function fixture() {
     branch: "synthetic",
     baseRef: "HEAD",
     ownerKind: "session",
+    ownerId: "agent:main:synthetic",
     createdAt: 1,
     lastActiveAt: 1,
   });
@@ -103,8 +125,97 @@ function fixture() {
   return { env, database, claim };
 }
 
+it("retains SQL-free effect authority across unrelated writes and revokes pending owner changes", async () => {
+  const { env, claim } = await fixture();
+  const context = captureOpenClawStateWorkerContext({ env });
+  const acceptSource = captureWorktreeRegistryReadGuard(context, "source-owner");
+  const acceptBinding = captureWorktreeRegistryReadGuard(context, "binding");
+  const acceptPublication = captureWorktreeRegistryReadGuard(context, "publication");
+  const record = (await readLiveRegistryWorktreeByOwner(
+    context,
+    "session",
+    "agent:main:synthetic",
+  ))!;
+  const assertSource = acceptSource(record);
+  const assertBinding = acceptBinding(record);
+  const assertPublication = acceptPublication(record);
+  const assertExactOwner = await prepareWorktreeRegistryGuard(context, {
+    predicates: [{ kind: "exact-owner", record }],
+  });
+  const sql = observeMainThreadSql();
+  try {
+    await clearRegistryWorktreeProvisionedChunks(env, record.id);
+    await updateRegistryWorktree(env, record.id, {
+      snapshotRef: "refs/openclaw/snapshots/synthetic",
+    });
+    await insertRegistryWorktree(env, { ...record, id: "child", ownerId: "agent:main:child" });
+    assertSource();
+    assertExactOwner();
+
+    await updateRegistryWorktree(
+      env,
+      record.id,
+      {
+        repositoryIdentity: { repoRoot: record.repoRoot, repoFingerprint: "normalized" },
+      },
+      {
+        workerAuthority: {
+          assertCurrent: assertExactOwner,
+          predicates: [{ kind: "binding", record }],
+        },
+      },
+    );
+    assertExactOwner();
+    assertSource();
+    expect(assertBinding).toThrow("owner or binding changed");
+    expect(assertPublication).toThrow(SessionWorktreeSourceChangedError);
+
+    let pendingChecks = 0;
+    const inspectCommit = interceptAdmission((request, admit) => {
+      if (request.stage === "commit") {
+        pendingChecks += 1;
+        expect(assertSource).toThrow(SessionWorktreeSourceChangedError);
+        expect(assertExactOwner).toThrow("owner or lifecycle changed");
+      }
+      return admit();
+    });
+    try {
+      await updateRegistryWorktree(
+        env,
+        claim.worktreeId,
+        {
+          repositoryIdentity: { repoRoot: record.repoRoot, repoFingerprint: "rebound" },
+        },
+        { assertCurrent: assertExactOwner },
+      );
+    } finally {
+      inspectCommit.mockRestore();
+    }
+    expect(pendingChecks).toBeGreaterThan(0);
+    expect(assertExactOwner).toThrow("owner or lifecycle changed");
+
+    const acceptReplacement = captureWorktreeRegistryReadGuard(context, "source-owner");
+    const current = (await readRegistryWorktree(context, record.id))!;
+    const assertSelected = acceptReplacement(current);
+    await insertRegistryWorktree(env, { ...current, id: "replacement", createdAt: 2 });
+    expect(assertSelected).toThrow(SessionWorktreeSourceChangedError);
+    sql.expectIdle();
+
+    const acceptCurrent = captureWorktreeRegistryReadGuard(context, "source-owner");
+    const assertCurrent = acceptCurrent(
+      await readLiveRegistryWorktreeByOwner(context, "session", record.ownerId!),
+    );
+    await closeOpenClawStateDatabaseAsync();
+    sql.clear();
+    expect(assertCurrent).toThrow();
+    sql.expectIdle();
+  } finally {
+    sql.restore();
+  }
+});
+
 it("settles snapshot chunks and exclusive removal claims without caller-thread SQL", async () => {
-  const { env, database, claim } = fixture();
+  const { env, database, claim } = await fixture();
   const sql = observeMainThreadSql();
   try {
     const mismatch = claimWorktreeRemovalRow(env, {
@@ -170,7 +281,7 @@ it("settles snapshot chunks and exclusive removal claims without caller-thread S
   expect(
     database.db.prepare("SELECT COUNT(*) AS count FROM worktree_provisioned_file_chunks").get(),
   ).toEqual({ count: 0 });
-  updateRegistryWorktree(env, claim.worktreeId, { lastActiveAt: 2 });
+  await updateRegistryWorktree(env, claim.worktreeId, { lastActiveAt: 2 });
   await admitWorktreeRunLeaseRowAsync(
     captureOpenClawStateWorkerContext({ env }),
     { ...claim, token: "successor" },
@@ -210,32 +321,21 @@ it("keeps session worktree row reads out of worker admission callbacks", async (
   const reads = observeMainThreadReads();
   const worktreeReads: string[] = [];
   let grants = 0;
-  const createAdmission = admissions.createSqliteWorkerOperationAdmission;
-  const admission = vi
-    .spyOn(admissions, "createSqliteWorkerOperationAdmission")
-    .mockImplementation((handler, ...options) =>
-      createAdmission(
-        (request, grant) => {
-          grants += 1;
-          reads.clear();
-          try {
-            return handler(request, grant);
-          } finally {
-            for (const call of reads.calls) {
-              for (const statement of call.mock.contexts) {
-                if (
-                  statement instanceof StatementSync &&
-                  /\bworktrees\b/u.test(statement.sourceSQL)
-                ) {
-                  worktreeReads.push(statement.sourceSQL);
-                }
-              }
-            }
+  const admission = interceptAdmission((_request, admit) => {
+    grants += 1;
+    reads.clear();
+    try {
+      return admit();
+    } finally {
+      for (const call of reads.calls) {
+        for (const statement of call.mock.contexts) {
+          if (statement instanceof StatementSync && /\bworktrees\b/u.test(statement.sourceSQL)) {
+            worktreeReads.push(statement.sourceSQL);
           }
-        },
-        ...options,
-      ),
-    );
+        }
+      }
+    }
+  });
   try {
     await expect(
       removeSessionWorktree({
@@ -255,34 +355,24 @@ it("keeps session worktree row reads out of worker admission callbacks", async (
 });
 
 it("preserves committed bytes after reply loss, rolls back refused commits, and fences unknown cleanup", async () => {
-  const { env, database } = fixture();
+  const { env, database } = await fixture();
   const input = {
     worktreeId: "synthetic",
     path: "retained.bin",
     chunkIndex: 0,
     data: new Uint8Array([9, 8, 7]),
   };
-  const run = stateWorker.runOpenClawStateWorkerOperation;
   let writes = 0;
-  const lostReply = vi
-    .spyOn(stateWorker, "runOpenClawStateWorkerOperation")
-    .mockImplementation((context, operation, options) =>
-      run(
-        context,
-        (scope) =>
-          operation({
-            execute: async (command, executeOptions) => {
-              const result = await scope.execute(command, executeOptions);
-              if (command.type === "worktrees.writeProvisionedSnapshot") {
-                writes += 1;
-                throw new Error("Synthetic lost command reply");
-              }
-              return result;
-            },
-          }),
-        options,
-      ),
-    );
+  const lostReply = interceptWorktreeWorkerOperation(
+    (execute) => async (command, executeOptions) => {
+      const result = await execute(command, executeOptions);
+      if (command.type === "worktrees.writeProvisionedSnapshot") {
+        writes += 1;
+        throw new Error("Synthetic lost command reply");
+      }
+      return result;
+    },
+  );
   try {
     await insertRegistryWorktreeProvisionedChunk(env, input);
   } finally {
@@ -292,18 +382,12 @@ it("preserves committed bytes after reply loss, rolls back refused commits, and 
 
   const revoked = new Error("Synthetic current owner revoked at commit");
   let current = true;
-  const createAdmission = admissions.createSqliteWorkerOperationAdmission;
-  const revoke = vi
-    .spyOn(admissions, "createSqliteWorkerOperationAdmission")
-    .mockImplementation((...args) => {
-      const admission = createAdmission(...args);
-      admission.observeRequests((request) => {
-        if (request.stage === "commit") {
-          current = false;
-        }
-      });
-      return admission;
-    });
+  const revoke = interceptAdmission((request, admit) => {
+    if (request.stage === "commit") {
+      current = false;
+    }
+    return admit();
+  });
   try {
     await expect(
       clearRegistryWorktreeProvisionedChunks(env, "synthetic", {
@@ -323,40 +407,36 @@ it("preserves committed bytes after reply loss, rolls back refused commits, and 
 
   const uncertain = new SqliteWorkerError("Synthetic lost native settlement", "outcome-unknown");
   let unknownWrites = 0;
-  const loseSettlement = vi
-    .spyOn(stateWorker, "runOpenClawStateWorkerOperation")
-    .mockImplementation((context, operation, options) =>
-      run(
-        context,
-        (scope) =>
-          operation({
-            execute: async (command, executeOptions) => {
-              if (command.type === "worktrees.writeProvisionedSnapshot") {
-                unknownWrites += 1;
-              }
-              return scope.execute(command, executeOptions);
-            },
-          }),
-        {
-          ...options,
-          createAdmission: (retained) => {
-            if (!options?.createAdmission) {
-              throw new Error("Expected run-end transaction admission");
-            }
-            const result = options.createAdmission({
-              settled: retained.settled.then(() => ({ kind: "unknown", error: uncertain })),
-            });
-            Object.defineProperty(result.admission, "committed", { get: () => undefined });
-            return result;
-          },
-        },
-      ),
-    );
+  const loseSettlement = interceptWorktreeWorkerOperation(
+    (execute) => async (command, executeOptions) => {
+      if (command.type === "worktrees.writeProvisionedSnapshot") {
+        unknownWrites += 1;
+      }
+      return execute(command, executeOptions);
+    },
+    (options) => ({
+      ...options,
+      createAdmission: (retained) => {
+        if (!options?.createAdmission) {
+          throw new Error("Expected run-end transaction admission");
+        }
+        const result = options.createAdmission({
+          settled: retained.settled.then(() => ({ kind: "unknown", error: uncertain })),
+        });
+        Object.defineProperty(result.admission, "committed", { get: () => undefined });
+        return result;
+      },
+    }),
+  );
   try {
     await withWorktreeRunEnd(env, async () => {
+      const context = captureOpenClawStateWorkerContext({ env });
+      const accept = captureWorktreeRegistryReadGuard(context, "exact-owner");
+      const assertCurrent = accept(await readRegistryWorktree(context, input.worktreeId));
       await expect(
         insertRegistryWorktreeProvisionedChunk(env, { ...input, chunkIndex: 1 }),
       ).rejects.toMatchObject({ code: "outcome-unknown" });
+      expect(assertCurrent).toThrow("owner or lifecycle changed");
       await expect(
         Promise.resolve().then(() => clearRegistryWorktreeProvisionedChunks(env, "synthetic")),
       ).rejects.toMatchObject({ code: "outcome-unknown" });
