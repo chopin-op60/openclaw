@@ -589,7 +589,9 @@ describe("loadWorkspaceSkills", () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const workspaceDir = await createTempWorkspaceDir();
     const executionDirs = [await createTempWorkspaceDir(), await createTempWorkspaceDir()] as const;
-    await writeWorkspaceSkills(workspaceDir, [{ name: "cached-skill", description: "Agent skill" }]);
+    await writeWorkspaceSkills(workspaceDir, [
+      { name: "cached-skill", description: "Agent skill" },
+    ]);
     for (const executionDir of executionDirs) {
       await writeWorkspaceSkills(executionDir, [
         { name: "cached-skill", description: "Losing execution copy" },
@@ -612,7 +614,10 @@ describe("loadWorkspaceSkills", () => {
       ).toEqual(["cached-skill"]);
       for (const executionDir of executionDirs) {
         const entries = await prepareWorkspaceSkills(workspaceDir, scoped(executionDir));
-        expect(entries.map((entry) => entry.skill.name)).toEqual(["cached-skill", "execution-skill"]);
+        expect(entries.map((entry) => entry.skill.name)).toEqual([
+          "cached-skill",
+          "execution-skill",
+        ]);
         expect(entries[0]?.skill.description).toBe("Agent skill");
         expect(entries[1]?.skill.description).toBe(executionDir);
       }
@@ -627,7 +632,9 @@ describe("loadWorkspaceSkills", () => {
           .description,
       ).toBe("Agent skill");
       expect(getSkillsSnapshotVersion(workspaceDir)).toBe(version);
-      await writeWorkspaceSkills(workspaceDir, [{ name: "fresh-skill", description: "Fresh skill" }]);
+      await writeWorkspaceSkills(workspaceDir, [
+        { name: "fresh-skill", description: "Fresh skill" },
+      ]);
       expect(await prepareWorkspaceSkills(workspaceDir, options)).toEqual(first);
       await vi.advanceTimersByTimeAsync(60_000);
       for (const executionDir of executionDirs) {

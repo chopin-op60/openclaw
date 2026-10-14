@@ -6,8 +6,8 @@ import type { SkillEntry } from "../types.js";
 import { resolveBundledSkillsDir } from "./bundled-dir.js";
 import { hasBinary, resolveSkillRequiredBins } from "./config.js";
 import { loadSingleSkillDirectory } from "./local-loader.js";
-import { createSkillLoadDiagnostics } from "./skill-load-diagnostics.js";
 import { createSkillEntry } from "./skill-entry-metadata.js";
+import { createSkillLoadDiagnostics } from "./skill-load-diagnostics.js";
 import { mergeSkillRecords } from "./skill-precedence.js";
 import { resolveSkillDiscoveryLimits } from "./skill-root-discovery.js";
 import {
