@@ -5,6 +5,7 @@ import { normalizeStringEntries } from "@openclaw/normalization-core/string-norm
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { resolvePathViaExistingAncestorSync } from "../../infra/boundary-path.js";
 import { isSqliteLockError } from "../../infra/sqlite-error-diagnostics.js";
+import { warnPluginSdkDeprecation } from "../../plugins/sdk-deprecation.js";
 import { isUserModelAuthProfileId } from "../../state/user-model-account-id.js";
 import { removePersistedPluginModelCatalogCredentials } from "../plugin-model-catalog-credentials.js";
 import { resolveProviderIdForAuth } from "../provider-auth-aliases.js";
@@ -19,7 +20,7 @@ import {
   removeOAuthRefreshGenerationPeers,
   type OAuthRefreshGenerationPeer,
 } from "./oauth-refresh-peers.js";
-import { resolveSharedAuthStorePath } from "./path-resolve.js";
+import { prepareSharedAuthStoreOwnership, resolveSharedAuthStorePath } from "./path-resolve.js";
 import { loadPersistedAuthProfileStore } from "./persisted.js";
 import { preparePersonalAuthProfileUsage } from "./personal-usage.js";
 import { dedupeProfileIds, listProfilesForProvider } from "./profile-list.js";
@@ -29,7 +30,10 @@ import { resolveAuthProfileDatabasePath, runAuthProfileWriteTransaction } from "
 import { logDroppedAuthProfileBookkeeping } from "./state-observation.js";
 import {
   ensureAuthProfileStoreForLocalUpdate,
+  ensureAuthProfileStoreForLocalUpdateAsync,
   loadAuthProfileStoreWithoutExternalProfiles,
+  loadAuthProfileStoreWithoutExternalProfilesAsync,
+  resolvePersistedAuthProfileOwnerAgentDirAsync,
   saveAuthProfileStore,
   saveAuthProfileStoreIfPersistenceSnapshotMatches,
   updateAuthProfileStoreWithLock,
@@ -37,7 +41,6 @@ import {
 import {
   captureAuthProfileStorePersistenceSnapshot,
   isSharedMainAuthProfileAgentDir,
-  resolvePersistedAuthProfileOwnerAgentDir,
   resolveRuntimeAuthProfileAgentDir,
   restoreAuthProfileStorePersistenceSnapshot,
   applyScopedAuthReadThrough,
@@ -117,11 +120,14 @@ export async function promoteAuthProfileInOrder(params: {
   profileId: string;
   createIfMissing?: boolean;
   createFromOrder?: string[];
+  assertCurrent?: () => void;
 }): Promise<Result<AuthProfileStore, "lock-contention">> {
+  params.assertCurrent?.();
   const providerKey = resolveProviderIdForAuth(params.provider);
-  const effectiveStore = ensureAuthProfileStoreForLocalUpdate(params.agentDir);
+  const effectiveStore = await ensureAuthProfileStoreForLocalUpdateAsync(params.agentDir);
   const updated = await updateAuthProfileStoreWithLock({
     agentDir: params.agentDir,
+    assertCurrent: params.assertCurrent,
     saveOptions: { preserveOrderProfileIds: [params.profileId, ...(params.createFromOrder ?? [])] },
     updater: (store) => {
       const profile = store.profiles[params.profileId] ?? effectiveStore.profiles[params.profileId];
@@ -159,12 +165,17 @@ export async function promoteAuthProfileInOrder(params: {
   return updated === null ? err("lock-contention") : ok(updated);
 }
 
-/** Upserts an auth profile immediately into the local store. */
+/** @deprecated Use upsertAuthProfileAsync. Retained until an announced stable removal window. */
 export function upsertAuthProfile(params: {
   profileId: string;
   credential: AuthProfileCredential;
   agentDir?: string;
 }): void {
+  warnPluginSdkDeprecation({
+    family: "auth-profiles",
+    method: "upsertAuthProfile",
+    replacement: "upsertAuthProfileAsync",
+  });
   const credential = normalizeAuthProfileCredential(params.credential);
   const store = ensureAuthProfileStoreForLocalUpdate(params.agentDir);
   store.profiles[params.profileId] = credential;
@@ -173,6 +184,25 @@ export function upsertAuthProfile(params: {
     sharedStoreWrite: true,
     syncExternalCli: false,
   });
+}
+
+/** Upsert the selected profile in the canonical writer without replacing neighboring profiles. */
+export async function upsertAuthProfileAsync(
+  params: Parameters<typeof upsertAuthProfile>[0],
+): Promise<void> {
+  const credential = normalizeAuthProfileCredential(params.credential);
+  const updated = await updateAuthProfileStoreWithLock({
+    agentDir: params.agentDir,
+    sharedStoreWrite: true,
+    saveOptions: { filterExternalAuthProfiles: false, syncExternalCli: false },
+    updater(store) {
+      store.profiles[params.profileId] = credential;
+      return true;
+    },
+  });
+  if (!updated) {
+    throw new Error("Failed to update auth profile store; retry when its writer is available.");
+  }
 }
 
 function providerAuthStoreOwners(requestedAgentDir?: string): Array<string | undefined> {
@@ -198,15 +228,18 @@ export async function removeProviderAuthProfilesWithLock(params: {
   agentDir?: string;
   profileIds?: readonly string[];
 }): Promise<AuthProfileStore | null> {
+  await prepareSharedAuthStoreOwnership(getScopedAuthProfileEnv());
   const owners = providerAuthStoreOwners(params.agentDir);
   for (let attempt = 0; attempt < OAUTH_REMOVAL_MAX_ATTEMPTS; attempt += 1) {
-    const targets = owners.map((owner) =>
-      createAuthProfileRemovalTarget({
-        agentDir: owner,
-        ...(params.profileIds
-          ? { profileIds: new Set(params.profileIds) }
-          : { provider: params.provider }),
-      }),
+    const targets = await Promise.all(
+      owners.map((owner) =>
+        createAuthProfileRemovalTarget({
+          agentDir: owner,
+          ...(params.profileIds
+            ? { profileIds: new Set(params.profileIds) }
+            : { provider: params.provider }),
+        }),
+      ),
     );
     const result = await removeAuthProfileTargetsWithLocks(targets, params.cfg ?? {});
     if (result.kind === "updated") {
@@ -253,13 +286,16 @@ function loadRemovalStore(agentDir?: string): AuthProfileStore {
   });
 }
 
-function createAuthProfileRemovalTarget(params: {
+async function createAuthProfileRemovalTarget(params: {
   agentDir?: string;
   profileIds?: ReadonlySet<string>;
   provider?: string;
-}): AuthProfileRemovalTarget {
+}): Promise<AuthProfileRemovalTarget> {
   // Removal compares the physical write target, without inherited credentials.
-  const store = loadRemovalStore(params.agentDir);
+  const store = await loadAuthProfileStoreWithoutExternalProfilesAsync(params.agentDir, {
+    allowKeychainPrompt: false,
+    inheritedAuthDir: params.agentDir,
+  });
   const profileIds =
     params.profileIds ?? new Set(listProfilesForProvider(store, params.provider ?? ""));
   return {
@@ -538,6 +574,7 @@ export async function removeAuthProfilesAcrossOwnerStores(params: {
       "Personal model accounts are managed in Settings → Profile → Connected accounts. Clearing a default keeps the credential; revoke access with the provider instead of removing a shared auth profile.",
     );
   }
+  await prepareSharedAuthStoreOwnership(getScopedAuthProfileEnv());
   for (let attempt = 0; attempt < OAUTH_REMOVAL_MAX_ATTEMPTS; attempt += 1) {
     const owners =
       params.provider === undefined ? [params.agentDir] : providerAuthStoreOwners(params.agentDir);
@@ -550,7 +587,7 @@ export async function removeAuthProfilesAcrossOwnerStores(params: {
       ]),
     );
     for (const profileId of profileIds) {
-      const ownerAgentDir = resolvePersistedAuthProfileOwnerAgentDir({
+      const ownerAgentDir = await resolvePersistedAuthProfileOwnerAgentDirAsync({
         agentDir: params.agentDir,
         profileId,
       });
@@ -558,13 +595,15 @@ export async function removeAuthProfilesAcrossOwnerStores(params: {
       ownerProfiles.add(profileId);
       profilesByOwner.set(ownerAgentDir, ownerProfiles);
     }
-    const targets = [...profilesByOwner].map(([agentDir, ownerProfileIds]) =>
-      createAuthProfileRemovalTarget({
-        agentDir,
-        ...(params.provider !== undefined
-          ? { provider: params.provider }
-          : { profileIds: ownerProfileIds }),
-      }),
+    const targets = await Promise.all(
+      [...profilesByOwner].map(([agentDir, ownerProfileIds]) =>
+        createAuthProfileRemovalTarget({
+          agentDir,
+          ...(params.provider !== undefined
+            ? { provider: params.provider }
+            : { profileIds: ownerProfileIds }),
+        }),
+      ),
     );
     const peers =
       params.beforeRemove || params.onIncomplete

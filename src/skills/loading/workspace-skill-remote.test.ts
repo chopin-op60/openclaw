@@ -15,10 +15,10 @@ import {
   loadWorkspaceSkills,
   prepareWorkspaceSkillEntries,
   prepareWorkspaceSkills,
-  readWorkspaceSkillSources,
   resolveWorkspaceSkillPromptEntries,
 } from "./workspace-skill-loader.js";
 import { buildSkillSnapshot } from "./workspace-skill-prompt.js";
+import { readWorkspaceSkillSources } from "./workspace-skill-source-reader.js";
 import {
   resolveWorkspaceSkillSourcePlan,
   type WorkspaceSkillSourceRequest,

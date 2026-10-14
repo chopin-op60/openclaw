@@ -4,7 +4,6 @@ import { registerNodeSqliteDisposeCallback } from "../../infra/kysely-sync-cache
 import {
   createSqliteQueryCache,
   executeSqliteQuerySync,
-  executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
   iterateSqliteQuerySync,
   prepareSqliteQueryTakeFirstSync,
@@ -58,10 +57,8 @@ import {
   validateCanonicalSessionRow,
 } from "./session-canonical-row.js";
 import { deferCanonicalSessionValidation } from "./session-canonical-validation-deferral.js";
-import {
-  attachSessionEntrySnapshots,
-  sessionEntrySnapshotColumns,
-} from "./session-entry-snapshots.js";
+import { attachSessionEntrySnapshots } from "./session-entry-snapshot-values.js";
+import { sessionEntrySnapshotColumns } from "./session-entry-snapshots.js";
 import { normalizeStoreSessionKey } from "./store-entry.js";
 import type { SessionEntry } from "./types.js";
 
@@ -587,47 +584,22 @@ export function assertCanonicalSqliteSessionKeysCurrent(
       canonicalReady: hasOpenClawAgentCanonicalValidation(database),
     });
   if (incremental) {
-    const inMemory = typeof identity?.identity === "symbol";
-    if (!inMemory && !canonicalReady) {
-      // A copied clean projection is not first-admission proof for an unknown file.
-      deferCanonicalSessionValidation(database, true);
-      const metadata: ValidatedSessionMetadata | undefined = collectMetadata
-        ? {
-            writeRevision: readSqliteDatabaseWriteRevision(database.db),
-            entries: new Map(),
-            keys: [],
-          }
-        : undefined;
-      scanCanonicalSqliteSessionEntries(database, undefined, metadata);
-      markOpenClawAgentCanonicalValidation(database);
-      remember();
-      return metadata;
-    }
-    const db = getNodeSqliteKysely<CanonicalSessionDatabase>(database.db);
-    const pending = db.selectFrom("session_canonical_validation_pending").select("session_key");
-    if (!executeSqliteQueryTakeFirstSync(database.db, pending.limit(1))) {
+    // Canonical writers preserve readiness; offline imports revoke the shared proof.
+    if (canonicalReady) {
       remember();
       return undefined;
     }
-    deferCanonicalSessionValidation(database, false);
-    if (!collectMetadata) {
-      const query = canonicalSessionValidationQuery(database).where(
-        "session_nodes.session_key",
-        "in",
-        pending,
-      );
-      for (const row of iterateSqliteQuerySync(database.db, query)) {
-        validateCanonicalSessionRow(row);
-      }
-      remember();
-      return undefined;
-    }
+    // A copied clean projection is not first-admission proof for an unknown file.
+    deferCanonicalSessionValidation(database, true);
   }
   // A list already needs the whole inventory; hand its parsed rows through once.
   const metadata: ValidatedSessionMetadata | undefined = collectMetadata
     ? { writeRevision: readSqliteDatabaseWriteRevision(database.db), entries: new Map(), keys: [] }
     : undefined;
   scanCanonicalSqliteSessionEntries(database, undefined, metadata);
+  if (incremental) {
+    markOpenClawAgentCanonicalValidation(database);
+  }
   remember();
   return metadata;
 }

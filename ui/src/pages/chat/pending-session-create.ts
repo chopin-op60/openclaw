@@ -11,10 +11,10 @@ import { parseAgentSessionKey } from "../../lib/sessions/session-key.ts";
 import { generateUUID } from "../../lib/uuid.ts";
 import { OpenClawLightDomElement } from "../../lit/openclaw-element.ts";
 import { SubscriptionsController } from "../../lit/subscriptions-controller.ts";
-import { renderCreationComposer } from "../new-session/creation-composer-render.ts";
+import { renderCreationComposer } from "../new-session/creation-composer-render.tsx";
 import { renderNewSessionBody } from "../new-session/draft-body.ts";
 import { chatStartupStatusLabel } from "./chat-run-startup.ts";
-import { renderChatComposer, resetChatComposerState } from "./components/chat-composer.ts";
+import { renderChatComposer, resetChatComposerState } from "./components/chat-composer.tsx";
 import { renderChatImageLightbox } from "./components/chat-image-lightbox.ts";
 import { renderChatPaneHeader } from "./components/chat-pane-header.ts";
 import { buildLocalUserMessage } from "./user-message-content.ts";
@@ -43,7 +43,8 @@ class PendingSessionCreate extends OpenClawLightDomElement {
       () => this.context?.chatSubmissions.readCreateComposer(this.sessionKey),
       (composer, notify) => composer.subscribe(notify),
     )
-    .watchStore(() => this.context?.placementStartup);
+    .watchStore(() => this.context?.placementStartup)
+    .watchStore(() => this.context?.theme);
   private readonly closeImage = () => {
     this.image?.release?.();
     this.image = null;
@@ -106,6 +107,7 @@ class PendingSessionCreate extends OpenClawLightDomElement {
         <div class="sidebar-region__header">
           ${renderChatPaneHeader({
             paneId: this.composerId,
+            presented: false,
             narrow: this.narrow,
             mergedChrome: this.mergedChrome,
             navDrawerOpen: this.navDrawerOpen,
@@ -125,8 +127,6 @@ class PendingSessionCreate extends OpenClawLightDomElement {
             platform: null,
             canReveal: false,
             copiedAction: null,
-            panelActions: nothing,
-            panelLayoutActions: nothing,
             sessionMenuAction: nothing,
             onBeginRename: noAction,
             onRenameInput: noAction,

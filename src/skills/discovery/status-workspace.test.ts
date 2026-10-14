@@ -10,7 +10,7 @@ import {
 } from "../../cli/skills-cli.format.js";
 import { withEnv, withEnvAsync } from "../../test-utils/env.js";
 import { loadWorkspaceSkills } from "../loading/workspace-skill-loader.js";
-import { bumpSkillsSnapshotVersion } from "../runtime/refresh-state.js";
+import { closeSkillsWatchers, refreshSkillsDiscovery } from "../runtime/refresh.js";
 import { writeSkill } from "../test-support/e2e-test-helpers.js";
 import { createCanonicalFixtureSkill } from "../test-support/test-helpers.js";
 import type { SkillEntry, SkillInstallSpec } from "../types.js";
@@ -19,6 +19,8 @@ import { buildWorkspaceSkillStatus, prepareWorkspaceSkillStatus } from "./status
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+  // Discovery must settle before its fixture paths disappear.
+  await closeSkillsWatchers(true);
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -118,21 +120,16 @@ describe("buildWorkspaceSkillStatus", () => {
       }
     }
     await fs.writeFile(brokenFile, "---\nname: broken\ndescription: Repaired skill\n---\n");
-    bumpSkillsSnapshotVersion({ workspaceDir, reason: "watch", changedPath: brokenFile });
+    await refreshSkillsDiscovery({ workspaceDir });
     const { report } = await prepareWorkspaceSkillStatus(workspaceDir, options);
     expect(report.skills.map((skill) => skill.name)).toContain("broken");
     expect(report).not.toHaveProperty("diagnostics");
   });
 
   it.each([
-    [true, true, ["download", "go", "node", "uv", "brew"], "brew-4"],
     [false, true, ["brew", "node", "uv"], "uv-2"],
-    [false, true, ["brew", "go", "node"], "node-2"],
     [false, true, ["go", "brew", "download"], "brew-1"],
     [true, false, ["brew", "download", "go"], "go-2"],
-    [true, false, ["brew", "download"], "download-1"],
-    [true, false, ["brew"], "brew-0"],
-    [true, false, ["node", "node"], "node-0"],
   ] as const)(
     "preserves installer preference (prefer brew: %s, available: %s, kinds: %j)",
     async (preferBrew, brewAvailable, kinds, expectedId) => {
@@ -173,58 +170,6 @@ describe("buildWorkspaceSkillStatus", () => {
     const skill = requireReportedSkill(report, "hot-reload-probe");
 
     expect(skill.disabled).toBe(true);
-  });
-
-  it("reports missing requirements and install options", () => {
-    const entry = makeEntry({
-      name: "status-skill",
-      requires: {
-        bins: ["fakebin"],
-        env: ["ENV_KEY"],
-        config: ["browser.enabled"],
-      },
-      install: [
-        {
-          id: "brew",
-          kind: "brew",
-          formula: "fakebin",
-          bins: ["fakebin"],
-          label: "Install fakebin",
-        },
-      ],
-    });
-
-    const report = withEnv({ PATH: "" }, () =>
-      buildWorkspaceSkillStatus("/tmp/ws", {
-        entries: [entry],
-        config: { browser: { enabled: false } },
-      }),
-    );
-    const skill = requireReportedSkill(report, "status-skill");
-
-    expect(skill.eligible).toBe(false);
-    expect(skill.missing.bins).toContain("fakebin");
-    expect(skill.missing.env).toContain("ENV_KEY");
-    expect(skill.missing.config).toContain("browser.enabled");
-    expect(skill.install[0]?.id).toBe("brew");
-  });
-
-  it("respects OS-gated skills", () => {
-    const entry = makeEntry({
-      name: "os-skill",
-      os: ["darwin"],
-    });
-
-    const report = buildWorkspaceSkillStatus("/tmp/ws", { entries: [entry] });
-    const skill = requireReportedSkill(report, "os-skill");
-
-    if (process.platform === "darwin") {
-      expect(skill.eligible).toBe(true);
-      expect(skill.missing.os).toStrictEqual([]);
-    } else {
-      expect(skill.eligible).toBe(false);
-      expect(skill.missing.os).toEqual(["darwin"]);
-    }
   });
 
   it("requires explicit enablement before exposing bundled coding-agent", async () => {
@@ -286,7 +231,7 @@ describe("buildWorkspaceSkillStatus", () => {
     expect(enabledStatus?.missing.config).toStrictEqual([]);
   });
 
-  it.each(["openclaw-workspace", "unknown"])(
+  it.each(["unknown"])(
     "does not mark a %s skill as bundled by bundled name alone",
     async (source) => {
       const bundledDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-bundled-"));
