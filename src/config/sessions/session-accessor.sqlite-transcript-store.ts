@@ -1,4 +1,3 @@
-import type { SessionTreeEntry } from "@openclaw/agent-core";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { parseCompactionDetails } from "../../../packages/agent-core/src/harness/compaction/compaction-details.js";
 import type { AgentMessage } from "../../agents/runtime/index.js";
@@ -24,7 +23,7 @@ import {
   readEventTimestamp,
   readTranscriptEventId,
   readTranscriptEventMessage,
-  readTranscriptIdentityByEventId,
+  type SqliteTranscriptSnapshotRow,
 } from "./session-accessor.sqlite-read.js";
 import { getSessionKysely, type ResolvedTranscriptScope } from "./session-accessor.sqlite-scope.js";
 import type {
@@ -56,6 +55,7 @@ import {
   writableSessionActorNavigation,
 } from "./session-actor-transaction.js";
 import { withSessionActorTranscriptRewrite } from "./session-actor-transcript-publication.worker.js";
+import { SqliteTranscriptMutationConflictError } from "./session-mutation-conflict-error.js";
 import {
   createTranscriptIndexAppenderInTransaction,
   deleteSessionTranscriptIndexInTransaction,
@@ -71,6 +71,7 @@ import {
   transcriptRewritePreservesProjection,
 } from "./session-transcript-rewrite-effects.js";
 import { canonicalizeTranscriptEventMedia } from "./transcript-event-media.js";
+import { projectTranscriptNavigationFields } from "./transcript-navigation-fields.js";
 import {
   createTranscriptEventInserter,
   createTranscriptPayloadUpdater,
@@ -197,6 +198,7 @@ export function appendTranscriptEventInTransaction(
       const eventJson =
         options.eventJson ??
         withoutSqliteDatabaseWriteScope(database.db, () => JSON.stringify(persistedEvent));
+      const utf8Bytes = Buffer.byteLength(eventJson) + 1;
       let projectionNeedsRebuild = false;
       preserveSessionEntryCacheAcrossWrite(database, () => {
         insertEvent({
@@ -213,11 +215,11 @@ export function appendTranscriptEventInTransaction(
           actor.transcript.payloads = writableSessionActorMap(actor.transcript.payloads);
           actor.transcript.payloads.set(seq, {
             event: stored,
-            serializedBytes: Buffer.byteLength(eventJson) + 1,
+            serializedBytes: utf8Bytes,
           });
           actor.transcript.navigation = writableSessionActorNavigation(actor.transcript.navigation);
-          // SAFETY: The same canonical event feeds the existing projection and tree codecs.
-          actor.transcript.navigation.push({ ...(stored as SessionTreeEntry), seq });
+          const navigation = isRecord(stored) ? projectTranscriptNavigationFields(stored) : {};
+          actor.transcript.navigation.push(Object.assign(navigation, { seq }));
         }
         cursor.nextSeq = seq + 1;
         cursor.appendToIndex ??= createTranscriptIndexAppenderInTransaction(
@@ -300,10 +302,9 @@ export function appendTranscriptEventInTransaction(
         ? undefined
         : projectSessionRowTranscriptFields(
             persistedEvent,
-            Buffer.byteLength(
-              eventJson,
-              readTranscriptStorageEncoding(database.db) === "UTF-8" ? "utf8" : "utf16le",
-            ) + 1,
+            readTranscriptStorageEncoding(database.db) === "UTF-8"
+              ? utf8Bytes
+              : Buffer.byteLength(eventJson, "utf16le") + 1,
             seq,
           );
       if (options.touchMutation !== false) {
@@ -341,9 +342,7 @@ export function appendTranscriptEventsInTransaction(
   const iterator = events[Symbol.iterator]();
   const appendOptions = {
     ...options,
-    onProjectionReconcileNeeded: () => {
-      projectionNeedsRebuild = true;
-    },
+    onProjectionReconcileNeeded: () => (projectionNeedsRebuild = true),
     scheduleProjectionReconcile: false,
     touchMutation: false,
   };
@@ -403,6 +402,8 @@ export function replaceSqliteTranscriptEventsInTransaction(
     preserveSessionWindowRecency?: boolean;
     scheduleProjectionReconcile?: boolean;
     onProjectionReconcileNeeded?: () => void;
+    /** Capture inserted bytes only when the caller retains a replacement snapshot. */
+    writtenRows?: SqliteTranscriptSnapshotRow[];
   } = {},
 ): void {
   return withSqliteDatabaseWriteScope(
@@ -474,13 +475,11 @@ export function replaceSqliteTranscriptEventsInTransaction(
         if (identity && seenEventIds.has(identity.eventId)) {
           continue;
         }
-        insertEvent({
-          seq,
-          eventJson: withoutSqliteDatabaseWriteScope(database.db, () =>
-            JSON.stringify(persistedEvent),
-          ),
-          createdAt,
-        });
+        const eventJson = withoutSqliteDatabaseWriteScope(database.db, () =>
+          JSON.stringify(persistedEvent),
+        );
+        insertEvent({ seq, eventJson, createdAt });
+        options.writtenRows?.push({ seq, eventJson });
         appendToIndex({
           seq,
           event: persistedEvent,
@@ -620,9 +619,7 @@ export function rewriteSqliteTranscriptEventRowsInTransaction(
         for (const row of rewrites) {
           const result = rewrite(row);
           if (result.numAffectedRows !== 1n) {
-            throw new Error(
-              `Transcript row ${resolved.sessionId}:${row.seq} changed before exact rewrite`,
-            );
+            throw new SqliteTranscriptMutationConflictError(resolved.sessionId);
           }
         }
         // Correlation and identical prompt captures preserve admitted input; other
@@ -721,15 +718,6 @@ export function readTranscriptMessageByScopedIdempotencyKey(
   return message
     ? { messageId: readTranscriptEventId(found.event) ?? idempotencyKey, message }
     : undefined;
-}
-
-export function readTranscriptMessageByEventId(
-  database: OpenClawAgentDatabase,
-  scope: ResolvedTranscriptScope,
-  eventId: string,
-): { messageId: string; message: unknown } | undefined {
-  const identity = readTranscriptIdentityByEventId(database, scope.sessionId, eventId);
-  return identity ? readTranscriptMessageByIdentity(database, scope, identity) : undefined;
 }
 
 export function sanitizeTranscriptMessageForStorage<TMessage>(message: TMessage): TMessage {

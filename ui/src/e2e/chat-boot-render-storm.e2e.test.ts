@@ -32,16 +32,35 @@ async function nextFrame(page: Page) {
   );
 }
 
-// The same performUpdate boundary used by the campaign's browser-init census.
-// Counting all tags also exposes work transferred from a host into its children.
+// Lit updates retain timing data; pane connections also count the Solid host.
 async function installRenderProbe(page: Page) {
   await page.addInitScript(() => {
     const counts = new Map<string, RenderCount>();
     window.chatBootRenderCounts = counts;
     const patched = new WeakSet<object>();
     const instances = new WeakSet<object>();
+    const recordInstance = (element: HTMLElement) => {
+      const count = counts.get(element.localName) ?? {
+        updates: 0,
+        milliseconds: 0,
+        instances: 0,
+      };
+      if (!instances.has(element)) {
+        instances.add(element);
+        count.instances += 1;
+      }
+      counts.set(element.localName, count);
+      return count;
+    };
     const define = customElements.define.bind(customElements);
     customElements.define = (name, constructor, options) => {
+      if (name === "openclaw-chat-pane") {
+        const connected = constructor.prototype.connectedCallback;
+        constructor.prototype.connectedCallback = function (this: HTMLElement) {
+          recordInstance(this);
+          return connected.call(this);
+        };
+      }
       let prototype = constructor.prototype;
       while (prototype && !Object.hasOwn(prototype, "performUpdate")) {
         prototype = Object.getPrototypeOf(prototype);
@@ -50,21 +69,13 @@ async function installRenderProbe(page: Page) {
         patched.add(prototype);
         const update = prototype.performUpdate;
         prototype.performUpdate = function (this: HTMLElement) {
-          const count = counts.get(this.localName) ?? {
-            updates: 0,
-            milliseconds: 0,
-            instances: 0,
-          };
+          const count = recordInstance(this);
           const start = performance.now();
           try {
             return update.call(this);
           } finally {
             count.updates += 1;
             count.milliseconds += performance.now() - start;
-            if (!instances.has(this)) {
-              instances.add(this);
-              count.instances += 1;
-            }
             counts.set(this.localName, count);
           }
         };
@@ -254,13 +265,13 @@ suite.define(() => {
         const measurement = await page.evaluate(() => ({
           tags: Object.fromEntries(window.chatBootRenderCounts),
           closedMenuItems: document.querySelectorAll(
-            "openclaw-chat-pane wa-dropdown:not([open]) wa-dropdown-item",
+            'openclaw-chat-pane [role="menu"][popover]:not(:popover-open) [role^="menuitem"]',
           ).length,
           closedMenuHosts: Array.from(
             document.querySelectorAll(
-              "openclaw-chat-pane wa-dropdown:not([open]) wa-dropdown-item",
+              'openclaw-chat-pane [role="menu"][popover]:not(:popover-open) [role^="menuitem"]',
             ),
-            (item) => item.closest("wa-dropdown")?.className,
+            (item) => item.closest('[role="menu"][popover]')?.className,
           ),
         }));
         await writeFile(
@@ -287,7 +298,7 @@ suite.define(() => {
           .getByRole("menu", { name: `Actions for ${label}` })
           .waitFor({ state: "visible" });
         expect(
-          await pane.locator("openclaw-chat-header-session-menu wa-dropdown-item").count(),
+          await pane.locator('openclaw-chat-header-session-menu [role^="menuitem"]').count(),
         ).toBeGreaterThan(10);
         await page.keyboard.press("Escape");
         await pane.getByRole("button", { name: "Session sharing", exact: true }).click();

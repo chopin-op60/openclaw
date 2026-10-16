@@ -1,7 +1,7 @@
-import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import { ok, type Result } from "@openclaw/normalization-core/result";
 import { GATEWAY_OWNER_PROFILE_ID } from "../../packages/gateway-protocol/src/schema/user-profile-constants.js";
+import type { EngineConnection } from "../infra/sql-connection.js";
 import {
   deferSqlitePostCommitPublication,
   stageSqliteTransactionState,
@@ -32,6 +32,7 @@ import {
   applyUserProfileEmailBinding,
   bindPreparedUserProfileIdentity,
   projectUserProfileDisplay,
+  projectUserProfileSnapshot,
   projectCatalogUserProfileIdentity,
   resolveCatalogProfile,
   toUserProfile,
@@ -161,6 +162,22 @@ export function readResidentGatewayOwnerProfile(pathname: string) {
   return toUserProfile({ ...owner, created_at: owner.gatewayOwnerCreatedAt });
 }
 
+/** Existing authenticated email bindings use the same write-through catalog as role checks. */
+export function readResidentUserProfileForEmail(email: string, pathname: string) {
+  const catalog = profileCatalogs.get(pathname);
+  const binding = catalog?.valid && profileBindings.get(catalog.rows)?.byEmail.get(email);
+  if (!binding) {
+    return undefined;
+  }
+  catalog.assertCurrent?.(binding.profileId);
+  const profile = resolveCatalogProfile(catalog.rows, binding.profileId);
+  if (profile) {
+    catalog.assertCurrent?.(profile.id);
+    return toUserProfile(profile);
+  }
+  return undefined;
+}
+
 /** Sharing pickers consume the session projection's committed display catalog. */
 export function listResidentUserProfileDisplayFacts(options: OpenClawStateDatabaseOptions = {}) {
   const catalog = profileCatalogs.get(profileCatalogPath(options));
@@ -182,9 +199,9 @@ export function listResidentUserProfileDisplayFacts(options: OpenClawStateDataba
   }));
 }
 
-/** Projection readiness follows physical admission; warm checks never inspect SQLite. */
-export function isUserProfileCatalogReady(options: OpenClawStateDatabaseOptions = {}): boolean {
-  const catalog = profileCatalogs.get(profileCatalogPath(options));
+/** Pass the prepared absolute database path for allocation-free checks of live owner state. */
+export function isUserProfileCatalogReady(pathname = profileCatalogPath({})): boolean {
+  const catalog = profileCatalogs.get(pathname);
   return Boolean(catalog?.valid && profileBindings.has(catalog.rows));
 }
 type ProfileCatalog = {
@@ -217,7 +234,7 @@ type ProfileMutationPublication = {
 const profileMutationPublications = new Set<ProfileMutationPublication>();
 let stopCatalogEvents: (() => void) | undefined;
 let stopBindingEvents: (() => void) | undefined;
-let profileCatalogHandles = new WeakMap<DatabaseSync, Map<string, ProfileDisplayRow>>();
+let profileCatalogHandles = new WeakMap<EngineConnection, Map<string, ProfileDisplayRow>>();
 const profileBindings = new WeakMap<Map<string, ProfileDisplayRow>, UserProfileEmailBindingIndex>();
 
 function supersedeBindingPublications(
@@ -638,6 +655,22 @@ export async function prepareUserProfileCatalog(options: OpenClawStateDatabaseOp
   };
 }
 
+/** Lists share committed profile facts rather than reserving the shared-state writer. */
+export async function readUserProfileSnapshot(
+  githubAccountIds?: readonly number[],
+  options: OpenClawStateDatabaseOptions = {},
+) {
+  const catalog = await acquireUserProfileCatalog(options);
+  try {
+    for (const row of catalog.rows.values()) {
+      catalog.assertCurrent(row.id);
+    }
+    return projectUserProfileSnapshot(catalog.rows, catalog.bindings, githubAccountIds);
+  } finally {
+    catalog.release();
+  }
+}
+
 /** Prepare once off-thread; execution reads only committed facts retained by this owner. */
 export async function prepareUserProfileIdentity(
   profileId: string,
@@ -653,7 +686,7 @@ export async function prepareUserProfileIdentity(
 }
 
 /** Stage exact changed keys before commit so observers always see the whole committed catalog. */
-export function stageUserProfileCatalogChange(db: DatabaseSync, profileIds: string[]): void {
+export function stageUserProfileCatalogChange(db: EngineConnection, profileIds: string[]): void {
   const catalog = profileCatalogHandles.get(db);
   if (catalog) {
     const rows = selectProfileAccessEntries(db, profileIds);
@@ -672,7 +705,7 @@ export function stageUserProfileCatalogChange(db: DatabaseSync, profileIds: stri
   }
 }
 
-export function publishUserProfilesChange(db: DatabaseSync, ...profileIds: string[]): void {
+export function publishUserProfilesChange(db: EngineConnection, ...profileIds: string[]): void {
   stageUserProfileCatalogChange(db, profileIds);
   deferSqlitePostCommitPublication(db, emitUserProfilesChanged);
 }

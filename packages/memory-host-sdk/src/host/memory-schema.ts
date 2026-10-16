@@ -5,6 +5,9 @@ import {
   MEMORY_EMBEDDING_CACHE_TABLE,
   MEMORY_INDEX_STATE_TABLE,
 } from "./memory-schema-base.js";
+import * as provenanceSchema from "./memory-schema-provenance.js";
+import { ensureMemoryRecallMetadataSchema } from "./memory-schema-recall.js";
+import { migrateMemoryIndexStorage } from "./memory-schema-storage-migration.js";
 import {
   backfillMemoryPathFtsRows,
   dropDisabledMemoryFts,
@@ -18,11 +21,6 @@ import {
   MEMORY_INDEX_PATHS_FTS_TABLE,
   MEMORY_INDEX_SOURCES_TABLE,
   reconcileMemoryChunkFtsRows,
-} from "./memory-schema-fts.js";
-import * as provenanceSchema from "./memory-schema-provenance.js";
-import { ensureMemoryRecallMetadataSchema } from "./memory-schema-recall.js";
-import { migrateMemoryIndexStorage } from "./memory-schema-storage-migration.js";
-import {
   canReuseSqliteSchemaInTransaction,
   getSqliteDatabaseAdmission,
   migrateSqliteSchemaToStrict,
@@ -30,6 +28,8 @@ import {
   publishSqliteDatabaseAdmission,
   runSqliteImmediateTransactionSync,
   stageSqliteTransactionState,
+  sqlPublicationAnchor,
+  type PostgresSqlConnection,
   type SqliteDatabaseAdmissionKey,
 } from "./openclaw-runtime-sqlite.js";
 export {
@@ -55,7 +55,7 @@ export {
   MEMORY_PATH_FTS_TRIGGER_DEFINITIONS,
   MEMORY_CHUNK_FTS_TRIGGER_DEFINITIONS,
   rebuildMemoryChunkFts,
-} from "./memory-schema-fts.js";
+} from "./openclaw-runtime-sqlite.js";
 export {
   ensureMemoryChunkProvenance,
   MEMORY_INDEX_CHUNK_PROVENANCE_TABLE,
@@ -98,16 +98,16 @@ const memoryIndexSchemaAdmissionKeys = new WeakMap<
 
 /** Derived-index replacements preserve the admitted memory table contracts. */
 export function stageMemoryIndexSchemaExtension(
-  db: DatabaseSync,
+  db: DatabaseSync | PostgresSqlConnection,
   replacement?: { ftsAvailable: boolean },
 ): void {
-  const key = memoryIndexSchemaAdmissionKeys.get(db);
+  const key = memoryIndexSchemaAdmissionKeys.get(sqlPublicationAnchor(db));
   const admitted = key && getSqliteDatabaseAdmission(db, key);
   if (!key || !admitted || (replacement && replacement.ftsAvailable !== admitted.ftsAvailable)) {
     return;
   }
   if (
-    !stageSqliteTransactionState(db, {
+    !stageSqliteTransactionState(sqlPublicationAnchor(db), {
       stage: () => {},
       rollback: () => {},
       commit: () => publishSqliteDatabaseAdmission(db, key, admitted),
@@ -381,7 +381,7 @@ export function ensureMemoryIndexSchema(params: {
     schemaDependent: true,
     read: readMemoryIndexSchemaAdmission,
   };
-  memoryIndexSchemaAdmissionKeys.set(params.db, admissionKey);
+  memoryIndexSchemaAdmissionKeys.set(sqlPublicationAnchor(params.db), admissionKey);
   const admitted = getSqliteDatabaseAdmission(params.db, admissionKey);
   if (admitted) {
     provenanceSchema.backfillMemoryChunkProvenance(params.db);

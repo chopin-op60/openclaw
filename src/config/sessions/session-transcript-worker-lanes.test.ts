@@ -29,7 +29,7 @@ import type { SessionHistoryWorkerDatabase } from "./session-transcript-worker.t
 
 it("keeps native close conservative until an unqualified reader is retired", async () => {
   const pool = createSessionTranscriptHistoryPool();
-  const request = { kind: "prewarm" as const, database: input().database, env: {} };
+  const request = { kind: "prewarm" as const, database: input().database, env: {}, history: false };
   const read = () => pool.run(() => request, {});
   observed.run.mockResolvedValue({ ok: true, value: { kind: "prewarm" } });
   try {
@@ -46,6 +46,32 @@ it("keeps native close conservative until an unqualified reader is retired", asy
   } finally {
     observed.rotate.mockResolvedValue(undefined);
     await pool.rotate();
+  }
+});
+
+it("takes no writer reservations for 150 concurrent cold history reads", async () => {
+  observed.preparedDatabase = false;
+  const request = input();
+  const reservations = channel("openclaw.agent-database.reservation");
+  const reserve = vi.fn();
+  reservations.subscribe(reserve);
+  observed.run.mockResolvedValue({
+    ok: true,
+    value: { kind: "transcript-watermark", watermark: undefined },
+  });
+  try {
+    const results = await Promise.all(
+      Array.from({ length: 150 }, (_, index) =>
+        withSessionHistoryWorkerDatabase(request.database, (owner) =>
+          owner.readWatermark({ scope: { ...request.scope, sessionId: `cold-${index}` } }),
+        ),
+      ),
+    );
+    expect(results).toHaveLength(150);
+    expect(observed.run).toHaveBeenCalledTimes(150);
+    expect(reserve.mock.calls.length).toBe(0);
+  } finally {
+    reservations.unsubscribe(reserve);
   }
 });
 
@@ -211,7 +237,7 @@ it("keeps cold reads progressing while history searches await the same writer", 
     );
     releaseWriter.resolve();
     await writer;
-    // A cold reader holding the writer must not queue behind searches needing that writer.
+    // Cold schema admission must not queue behind searches needing the same admission turn.
     expect(await coldQueued.promise).toBe(false);
     allowStatus.resolve();
     expect(await cold).toBe(false);
@@ -316,6 +342,10 @@ it.each([historyLane, maintenanceLane])(
     const first = prewarmSessionHistoryWorker(request.database, lane);
     const second = prewarmSessionHistoryWorker(request.database, lane);
     expect(observed.run).toHaveBeenCalledOnce();
+    expect(observed.run.mock.calls[0]?.[0]).toMatchObject({
+      kind: "prewarm",
+      history: lane === historyLane,
+    });
     expect(lane.pending).toBe(1);
     expect(isSessionHistoryWorkerCold(lane)).toBe(false);
     reply.resolve({ ok: true, value: { kind: "prewarm" } });

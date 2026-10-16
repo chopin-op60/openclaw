@@ -14,6 +14,12 @@ The Gateway applies revisioned config snapshots automatically. Most settings do
 not need a manual restart. `~/.openclaw/openclaw.json` remains the config source,
 including JSON5, `$include`, and environment substitutions.
 
+Startup waits for the config watcher's initial reconciliation, queued file-stability
+checks, and any resulting reload attempt before completing. Initial config
+publication cannot race the first request after startup.
+Credential refreshes that leave the effective config unchanged preserve pending
+work instead of invalidating its config snapshot.
+
 Writes made through the running Gateway publish their committed snapshot
 directly to the reload owner. They do not wait for a file-watcher event or its
 debounce window. Runtime consumers keep reading the last successfully applied
@@ -106,6 +112,11 @@ final reread, a `config.patch` or `config.apply` waiting for runtime application
 returns `UNAVAILABLE` with the committed config details. It does not wait for
 another file event. Repair the file, run `config.get`, then reapply the intended
 config. The Gateway does not overwrite the external edit.
+
+When the Gateway applies a valid external edit picked up by that final reread,
+a waiting write whose saved values were overwritten reports `superseded`
+instead of success. An unrelated edit that preserves the saved values can still
+complete successfully. Run `config.get` before reapplying.
 
 If you see `config reload skipped (invalid config)` or startup reports `Invalid
 config`, inspect the config, run `openclaw config validate`, then run `openclaw
@@ -272,7 +283,8 @@ their original handlers. Workspace changes reload directory hooks from the
 newly selected workspace. Reload does not replay `gateway:startup`.
 
 Under `gateway.controlUi`, the `enabled`, `environment`, `github`,
-`sessionObserver`, `embedSandbox`, `allowExternalEmbedUrls`, `experimental.customPlugins`, and
+`sessionObserver`, `embedSandbox`, `allowExternalEmbedUrls`, `experimental.customPlugins`,
+`experimental.claws`, and
 `automaticallyFetchFavicons` settings hot-apply. Reload open Control UI pages to
 pick up the environment label, CLI agent picker, embed preferences, and favicon
 display preference; the Gateway process keeps running. `allowedOrigins` and
@@ -412,6 +424,11 @@ files. In hybrid mode, edits under
 with its new config. Unchanged plugin instances retain their registration
 snapshots. A plugin's narrower reload policy can retain an instance or require a restart.
 
+Plugin config edits keep cached session rows when their model, harness, CLI backend,
+and session-extension facts stay unchanged. Completed model catalog publications
+refresh affected agents when those facts change; unrelated hook settings or
+plugin enablement do not rebuild the entire session list.
+
 Plugin install, update, enable, disable, uninstall, and metadata refresh apply
 through the running Gateway's plugin lifecycle without a Gateway restart.
 Explicit plugin actions also work when passive reload is `off`. Source or
@@ -424,6 +441,10 @@ Agent requests waiting to start pause while plugin hot reload drains the old
 runtime. They continue with the replacement when it is ready, or with the
 previous runtime after a successful rollback. You do not need to resend these
 requests. Failed restoration or Gateway shutdown still reports a failure.
+Already-admitted turns retain their runtime generation through nested model work.
+Unrelated plugin-owned settings do not invalidate a prepared `chat.send`; session,
+model, tool-policy, and core plugin admission-policy changes still recheck the
+facts used for admission.
 If a replacement fails before activation, rollback restores the previous configured
 model context limits without waiting for model discovery.
 

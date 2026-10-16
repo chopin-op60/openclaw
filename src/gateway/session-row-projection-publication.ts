@@ -50,6 +50,7 @@ export function createSessionRowPublication(owner: {
           publishedSource: row.publishedSource,
           storedEntry: entry,
           sharingEntry: entry,
+          entryAcquisitionPending: true,
         });
         return;
       }
@@ -332,28 +333,29 @@ export function subscribeSessionRowPublications({
 }): Array<() => void> {
   return [
     pluginStatePublication.subscribeFacts((change) => {
+      if (change.kind === "pending" || change.kind === "settled") {
+        return;
+      }
       const changed: records.Row[] = [];
-      for (const row of rows.values()) {
+      // Plugin writes are frequent; avoid an iterator result for every resident row.
+      rows.forEach((row) => {
         if (
-          !row.runtimeOwnershipDependencies ||
+          !row.runtimeOwnershipDependencies?.length ||
           !pluginStateReadDependenciesAffected(row.runtimeOwnershipDependencies, change)
         ) {
-          continue;
+          return;
         }
-        row.databaseFactsRevision++;
-        row.pendingDatabaseFacts = undefined;
-        if (row.retainedDatabaseFacts) {
-          row.retainedDatabaseFacts = {
+        records.invalidateDatabaseFacts(
+          row,
+          row.retainedDatabaseFacts && {
             ...row.retainedDatabaseFacts,
             runtimeOwnership: undefined,
             runtimeOwnershipDependencies: undefined,
-          };
-        }
-        row.preparedRuntimeOwnership = undefined;
-        row.runtimeOwnershipDependencies = undefined;
+          },
+        );
         dirty.add(records.identity(row));
         changed.push(row);
-      }
+      });
       if (changed.length > 0) {
         advanceRevision();
         revisions.invalidate(true);

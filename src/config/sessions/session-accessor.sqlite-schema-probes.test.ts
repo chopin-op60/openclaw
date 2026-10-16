@@ -12,6 +12,7 @@ import {
   openOpenClawAgentDatabaseReadOnly,
   withOpenClawAgentDatabaseReadOnly,
 } from "../../state/openclaw-agent-db-readonly.js";
+import { withOpenClawAgentDatabaseWrite } from "../../state/openclaw-agent-db-write.js";
 import {
   closeOpenClawAgentDatabasesForTest,
   closeOpenClawAgentDatabasesAsync,
@@ -29,6 +30,8 @@ import {
 import * as entryCache from "./session-accessor.sqlite-entry-cache.js";
 import { writeSessionEntry } from "./session-accessor.sqlite-entry-store.js";
 import { replaceSessionEntry } from "./session-accessor.sqlite-entry.js";
+import type { SessionMaintenanceMetadataResult } from "./session-accessor.sqlite-lifecycle-types.js";
+import { runSessionEntryWorkerMutation } from "./session-accessor.sqlite-replacement-worker.js";
 import {
   measureSessionSchemaProbes,
   measureSqliteSchemaProbes,
@@ -156,24 +159,58 @@ it("refreshes admitted session readers after worker commits without schema or fr
       mainKey: "main",
       statements: 0,
     });
-    runOpenClawAgentWriteTransaction((database) => {
-      setCanonicalSqliteSessionMainKey(database, "intermediate");
-      setCanonicalSqliteSessionMainKey(database, "configured");
-      expect(readCanonicalSessionMainKey(database)).toBe("configured");
-      expect(readCanonicalSessionMainKey(reader.database)).toBe("main");
-    }, options);
+    let fixtureWriteStarted = false;
+    let configured: Promise<void> | undefined;
+    await runSessionEntryWorkerMutation<SessionMaintenanceMetadataResult>(
+      { ...options, path: writer.path },
+      undefined,
+      () => {},
+      (maintenance) =>
+        maintenance.execute({
+          type: "session.maintenance.metadata",
+          input: { kind: "maintenance-statistics" },
+        }),
+      {
+        identityAgentId: options.agentId,
+        beforeCommit() {
+          // The real maintenance connection holds SQLite until this grant returns.
+          configured = withOpenClawAgentDatabaseWrite(
+            options,
+            () => {
+              fixtureWriteStarted = true;
+              runOpenClawAgentWriteTransaction((database) => {
+                setCanonicalSqliteSessionMainKey(database, "intermediate");
+                setCanonicalSqliteSessionMainKey(database, "configured");
+                expect(readCanonicalSessionMainKey(database)).toBe("configured");
+                expect(readCanonicalSessionMainKey(reader.database)).toBe("main");
+              }, options);
+            },
+            writer.db,
+          );
+          expect(fixtureWriteStarted).toBe(false);
+        },
+      },
+    );
+    await configured;
+    expect(fixtureWriteStarted).toBe(true);
     expect(readCanonicalSessionMainKey(reader.database)).toBe("configured");
     expect(await worker.execute({ type: "mainKey", input: undefined })).toEqual({
       mainKey: "configured",
       statements: 0,
     });
-    expect(() =>
-      runOpenClawAgentWriteTransaction((database) => {
-        setCanonicalSqliteSessionMainKey(database, "abandoned");
-        expect(readCanonicalSessionMainKey(database)).toBe("abandoned");
-        throw new Error("rollback main key");
-      }, options),
-    ).toThrow("rollback main key");
+    await withOpenClawAgentDatabaseWrite(
+      options,
+      () => {
+        expect(() =>
+          runOpenClawAgentWriteTransaction((database) => {
+            setCanonicalSqliteSessionMainKey(database, "abandoned");
+            expect(readCanonicalSessionMainKey(database)).toBe("abandoned");
+            throw new Error("rollback main key");
+          }, options),
+        ).toThrow("rollback main key");
+      },
+      writer.db,
+    );
     expect((await worker.execute({ type: "mainKey", input: undefined })).mainKey).toBe(
       "configured",
     );
@@ -225,11 +262,16 @@ it("refreshes admitted session readers after worker commits without schema or fr
       });
       try {
         expect(read()?.sessionId).toBe("probe");
-        writeSessionEntry(writer, "agent:main:probe", {
-          sessionId: "probe",
-          updatedAt: 1,
-          label: "current",
-        });
+        await withOpenClawAgentDatabaseWrite(
+          options,
+          (database) =>
+            writeSessionEntry(database, "agent:main:probe", {
+              sessionId: "probe",
+              updatedAt: 1,
+              label: "current",
+            }),
+          writer.db,
+        );
         expect(publications).toEqual([
           {
             prepared: expect.objectContaining({
@@ -260,27 +302,32 @@ it.each<{
 }>(
   (
     [
-      { cronRetention: true },
+      { cronRetention: { limit: 32 } },
+      { cronRetention: { limit: 1, afterSessionKey: "agent:main:cron:job:run:old" } },
       { expiredCronRuns: { agentId: "main", updatedBefore: 2 } },
       { expiredCronRuns: { agentId: "main", updatedBefore: 0 } },
     ] satisfies SessionEntryListScope[]
   ).map((scope) => ({
     scope,
-    fullKeys: scope.cronRetention
-      ? [
-          "agent:main:cron:job:run:old",
-          "agent:main:cron:job:run:recent",
-          "agent:other:cron:job:run:old",
-        ]
-      : scope.expiredCronRuns?.updatedBefore === 2
-        ? ["agent:main:cron:job:run:old"]
-        : [],
+    fullKeys:
+      scope.cronRetention?.limit === 1
+        ? ["agent:main:cron:job:run:recent"]
+        : scope.cronRetention
+          ? [
+              "agent:main:cron:job:run:old",
+              "agent:main:cron:job:run:recent",
+              "agent:other:cron:job:run:old",
+            ]
+          : scope.expiredCronRuns?.updatedBefore === 2
+            ? ["agent:main:cron:job:run:old"]
+            : [],
   })),
 )(
   "loads only selected cold snapshots outside the retention transaction: $scope",
   ({ scope, fullKeys }) => {
     const { database, options, read } = fixture(listSessionEntriesReadOnly);
     const saved = { prompt: "cron saved snapshot", skills: [] };
+    const usageFamilySessionIds = Array.from({ length: 1024 }, (_, i) => `previous-run-${i}`);
     runOpenClawAgentWriteTransaction((db) => {
       for (const [sessionKey, updatedAt] of [
         ["agent:main:cron:job:run:old", 1],
@@ -291,15 +338,20 @@ it.each<{
           sessionId: sessionKey,
           updatedAt,
           skillsSnapshot: saved,
+          usageFamilySessionIds,
         });
       }
     }, options);
     read();
     const materialized: string[] = [];
+    let hotPayloadBytes = 0;
     const prepare = database.db.prepare.bind(database.db);
     vi.spyOn(database.db, "prepare").mockImplementation((sql) => {
       const statement = prepare(sql);
       const observe = (row: Record<string, unknown>) => {
+        if (typeof row.entry_json === "string") {
+          hotPayloadBytes += Buffer.byteLength(row.entry_json);
+        }
         if (typeof row.skills_snapshot_json === "string") {
           materialized.push(String(row.session_key));
         }
@@ -344,6 +396,12 @@ it.each<{
       expect(entry.skillsSnapshot).toEqual(saved);
     }
     expect(entries.map(({ sessionKey }) => sessionKey)).toEqual(fullKeys);
+    if (scope.cronRetention?.limit === 1) {
+      // One page can read its hot payload twice, but must not hydrate its bloated siblings.
+      expect(hotPayloadBytes).toBeLessThan(
+        3 * Buffer.byteLength(JSON.stringify(usageFamilySessionIds)),
+      );
+    }
   },
 );
 

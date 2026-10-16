@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { admitStoreSearch } from "openclaw/plugin-sdk/database-engine-worker-runtime";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
@@ -104,8 +105,10 @@ export function maintainStandingIntentLifecycle(db: DatabaseSync, nowMs: number)
     db,
     kysely
       .selectFrom("standing_intents")
-      // Expiry comparison never decoded integers; keep its native range semantics.
-      .select((eb) => eb.fn.min(eb.cast<number>("expires_at", "real")).as("next_expiry"))
+      // Binary64 preserves millisecond deadlines without decoding unsafe stored integers.
+      .select((eb) =>
+        eb.fn.min(eb.cast<number>("expires_at", "double precision")).as("next_expiry"),
+      )
       .where("status", "in", ["pending", "armed", "fired"]),
   );
   let nextDueAt = expiry?.next_expiry ?? Infinity;
@@ -199,11 +202,24 @@ export function matchStandingIntentsInDatabase(
     return [];
   }
   const kysely = getNodeSqliteKysely<StandingIntentMatchDatabase>(db);
+  const search = admitStoreSearch(db, {
+    text: {
+      intents: {
+        table: "standing_intents_fts",
+        alias: "fts",
+        fields: ["trigger_keywords"],
+        matchField: "trigger_keywords",
+      },
+    },
+  });
+  if (!search.fullText) {
+    throw new Error(search.diagnostics.join("; "));
+  }
   let candidatesQuery = kysely
     .selectFrom("standing_intents as intent")
     .innerJoin("standing_intents_fts as fts", "fts.rowid", "intent.intent_key")
     .selectAll("intent")
-    .where("fts.trigger_keywords", "match", ftsQuery)
+    .where(search.fullText.match(search.text.intents!, ftsQuery))
     .where("intent.status", "=", "armed")
     .where("intent.creator_sender", "is not", null)
     .where("intent.expires_at", ">", nowMs)

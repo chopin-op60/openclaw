@@ -5,6 +5,7 @@ import { resolveStableChannelMessageIngress } from "openclaw/plugin-sdk/channel-
 import type { ChannelIngressQueue } from "openclaw/plugin-sdk/channel-outbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
+import type { ReplyPayload } from "openclaw/plugin-sdk/reply-payload";
 import { vi } from "vitest";
 import { resolveXAccount, type ResolvedXAccount } from "../accounts.js";
 import type { XApiClient, XPage, XPost } from "../api.js";
@@ -70,9 +71,8 @@ export function fixture(options: {
   onCursor?: () => void;
   cfg?: OpenClawConfig;
   replyText?: string;
+  finals?: ReplyPayload[];
   visibleSessionUrl?: string | null;
-  /** Null models an older host without capability advertisement. */
-  capabilities?: readonly string[] | null;
 }) {
   const cfg = options.cfg ?? config;
   const replies: Array<{ text: string; parent: string }> = [];
@@ -128,7 +128,17 @@ export function fixture(options: {
     if (!plan.delivery.deliver) {
       throw new Error("Missing X text delivery adapter");
     }
-    await plan.delivery.deliver({ text: options.replyText ?? "I am on it." }, { kind: "final" });
+    // Core turn delivery contract: a null prepared payload is suppressed, never delivered.
+    for (const payload of options.finals ?? [
+      { text: options.replyText ?? "[[x_success]] I am on it." },
+    ]) {
+      const prepared = plan.delivery.preparePayload
+        ? await plan.delivery.preparePayload(payload, { kind: "final" })
+        : payload;
+      if (prepared) {
+        await plan.delivery.deliver(prepared, { kind: "final" });
+      }
+    }
     await plan.turnAdoptionLifecycle?.onAdopted();
     return {
       admission: { kind: "dispatch" as const },
@@ -149,9 +159,6 @@ export function fixture(options: {
   const stateDir = `synthetic-x-monitor:${randomUUID()}`;
   const runtime = {
     version: "2026.9.8",
-    ...(options.capabilities === null
-      ? {}
-      : { capabilities: options.capabilities ?? ["sender-restricted-hidden-helpers-v1"] }),
     state: {
       openKeyedStore,
       resolveStateDir: () => stateDir,

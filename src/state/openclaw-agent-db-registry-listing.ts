@@ -5,6 +5,8 @@ import type { DatabaseSync } from "node:sqlite";
 import type { Result } from "@openclaw/normalization-core/result";
 import { cloneEnvWithPlatformSemantics } from "../config/config-env-vars.js";
 import { resolveStateDir } from "../config/state-dir.js";
+import { getDatabaseEngineSelection } from "../infra/database-engine/context.js";
+import type { EngineConnection } from "../infra/sql-connection.js";
 import {
   getOrLoadSqliteDatabaseAdmissionForPath,
   publishSqliteDatabaseAdmission,
@@ -111,7 +113,7 @@ const registry = resolveGlobalSingleton<{
 /** Registry facts retain their owner through deferred COMMIT publication. */
 export function emitOpenClawAgentDatabaseRegistryChange(
   agentId: string,
-  database?: DatabaseSync,
+  database?: EngineConnection,
 ): void {
   const change: SessionRowChange = { all: true, scope: { agentId, topology: true } };
   registry.publications.add(change);
@@ -225,7 +227,7 @@ export async function prepareOpenClawAgentDatabaseRegistryRemoval(
 
 /** Stage exact registry facts at the same native transaction boundary as their rows. */
 export function recordOpenClawAgentDatabaseRegistryMutation(
-  database: { db: DatabaseSync; path: string },
+  database: { db: EngineConnection; path: string },
   kind: AgentDatabaseRegistryMutation["kind"],
   sources: readonly { agentId: string; path: string; schemaVersion?: number }[],
 ): void {
@@ -472,7 +474,7 @@ export function readRegisteredAgentDatabases(
   artifactPreserving: boolean,
 ): OpenClawRegisteredAgentDatabase[] | Promise<OpenClawRegisteredAgentDatabase[]> {
   const pathname = resolveDatabasePath(options);
-  const read = ({ db }: { db: DatabaseSync }) =>
+  const read = ({ db }: { db: EngineConnection }) =>
     readRegisteredAgentDatabaseRows(db, pathname, artifactPreserving);
   const finish = (entries: OpenClawRegisteredAgentDatabase[] | undefined) => {
     if (entries === undefined) {
@@ -494,6 +496,17 @@ export function readRegisteredAgentDatabases(
 export async function inspectOpenClawRegisteredAgentDatabases(
   options: AgentDatabaseRegistryListOptions = {},
 ): Promise<OpenClawRegisteredAgentDatabase[]> {
+  if (getDatabaseEngineSelection()?.input) {
+    const read = await executeExistingOpenClawStateRead(
+      options,
+      { type: "agentDatabaseRegistry.read" },
+      { current: true },
+    );
+    if (read?.result.status === "unavailable") {
+      throw new Error(`OpenClaw state database ${resolveDatabasePath(options)} is unavailable.`);
+    }
+    return cloneRegisteredAgentDatabases(read?.result.entries ?? [], options);
+  }
   return readRegisteredAgentDatabases(options, true);
 }
 

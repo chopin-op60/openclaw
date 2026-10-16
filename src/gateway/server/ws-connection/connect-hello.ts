@@ -15,6 +15,7 @@ import {
   finalizeNodePairingCleanupClaim,
   recordPairedNodeConnection,
 } from "../../../infra/device-pairing-node.js";
+import { recordPairedDeviceAccess } from "../../../infra/device-pairing.js";
 import { formatErrorMessage as formatError } from "../../../infra/errors.js";
 import { commitPresence } from "../../../infra/system-presence.js";
 import { getGatewaySuspendAdmissionPhase } from "../../../process/gateway-work-admission.js";
@@ -177,6 +178,7 @@ export async function sendGatewayHello(
         : gatewayMethods.filter((method) => method !== "mcp.authLogin"),
       events,
       capabilities: [
+        GATEWAY_SERVER_CAPS.AGENT_SESSION_ID_CREATE,
         SYSTEM_RUN_EXECUTION_CONTEXT_CAPABILITY,
         GATEWAY_SERVER_CAPS.BOARD_WIDGET_PUT_CANVAS_DOC,
         GATEWAY_SERVER_CAPS.CHAT_SEND_ROUTING_CONTRACT,
@@ -199,6 +201,7 @@ export async function sendGatewayHello(
         GATEWAY_SERVER_CAPS.WORKTREES_RECOVER_REMOVAL_OWNER,
         GATEWAY_SERVER_CAPS.WORKTREES_RETIRE_SNAPSHOT_OWNER,
         GATEWAY_SERVER_CAPS.MODEL_CATALOG_SNAPSHOT,
+        GATEWAY_SERVER_CAPS.NODE_WORKER_DEVICE_FOLDERS,
         GATEWAY_SERVER_CAPS.NODE_PERMISSION_ERRORS,
         GATEWAY_SERVER_CAPS.NODE_WORKER_BUNDLE_RETENTION,
         GATEWAY_SERVER_CAPS.NODE_WORKER_BUNDLE_STATUS,
@@ -225,6 +228,7 @@ export async function sendGatewayHello(
         GATEWAY_SERVER_CAPS.SYSTEM_AGENT_WIZARD_CANCEL,
         GATEWAY_SERVER_CAPS.SYSTEM_AGENT_SETUP_MODEL_REF,
         GATEWAY_SERVER_CAPS.TASK_SUGGESTIONS_ACCEPT_MODES,
+        GATEWAY_SERVER_CAPS.TALK_SESSION_CLOSE_DISPOSITION,
       ],
     },
     snapshot,
@@ -356,6 +360,16 @@ export async function sendGatewayHello(
     return;
   }
   onHelloDelivered();
+  const metadata = context.pendingDeviceMetadata;
+  if (metadata) {
+    context.runDetachedConnectWork(
+      () => recordPairedDeviceAccess(metadata.deviceId, metadata.patch, metadata.identity),
+      (err) =>
+        logGateway.warn(
+          `device access metadata refresh failed conn=${connId}: ${formatForLog(err)}`,
+        ),
+    );
+  }
   try {
     const client = context.handler.getClient();
     if (

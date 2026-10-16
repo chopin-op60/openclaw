@@ -292,6 +292,13 @@ The caller still owns model allowlist validation, atomic persistence,
 `markLiveSwitchPending`, and any post-commit effects. Prefer
 `applySessionModelSelection(...)` whenever the full transaction is available.
 
+In an async session-entry patch, prepare an existing auth pin with
+`await prepareAuthProfileProvider({ agentDir, profileId })` from the same subpath
+and pass its result as `recordedProvider`. This reuses the runtime snapshot or
+reads persisted credentials through the auth owner. Pass the result even when
+its `provider` is `undefined`: it records completed preparation and prevents a
+synchronous fallback lookup. Skip preparation when the entry has no auth pin.
+
 Model-picker actions carry only bounded snapshot and catalog tokens. Channel
 actor identity, source-message binding, and serialized callback data stay in
 the channel's private authenticated envelope. Channel codecs opt into resolving
@@ -412,6 +419,8 @@ their payload for the listener. `include` and `exclude` apply to every event;
 the optional `includeTrusted` list further restricts only events marked trusted
 by the dispatcher. Omitting it preserves existing behavior, and an empty list
 accepts only untrusted events that pass `include`/`exclude`. Event payload fields
-cannot override the dispatcher's trust metadata. Accepted events retain their
-individual frozen copies; this filter does not change diagnostic collection or
-queue behavior.
+cannot override the dispatcher's trust metadata. Accepted plain event payloads
+share one frozen snapshot across listeners in a dispatch. Payloads with mutable
+opaque values (such as Maps or Dates) and private listener data retain individual
+copies. Listener mutations remain isolated from other listeners and producers;
+filtering does not change diagnostic collection or queue behavior.

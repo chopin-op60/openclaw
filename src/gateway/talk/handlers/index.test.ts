@@ -11,6 +11,8 @@ import { createEmbeddedRunHandle } from "../../../agents/embedded-agent-runner/r
 import { REALTIME_VOICE_AGENT_CONTEXT_INSTRUCTIONS } from "../../../agents/realtime-bootstrap-context.test-support.js";
 import { resolveCommandAuthorization } from "../../../auto-reply/command-auth.js";
 import type { OpenClawConfig } from "../../../config/config.js";
+import { captureRuntimeConfigWithSource } from "../../../config/runtime-config-capture-state.js";
+import { projectConfigOntoRuntimeSourceSnapshot } from "../../../config/runtime-source-projection.js";
 import { normalizeResolvedSecretInputString } from "../../../config/types.secrets.js";
 import { getAgentEventLifecycleGeneration } from "../../../infra/agent-events.js";
 import type { RealtimeVoiceProviderPlugin } from "../../../plugins/types.js";
@@ -24,7 +26,6 @@ import { withOpenClawTestState } from "../../../test-utils/openclaw-test-state.j
 import { resolveChatSendCallerContext } from "../../server-methods/gateway-client-identity.js";
 import type { GatewayClient, GatewayRequestHandlerOptions } from "../../server-methods/types.js";
 import { bindSessionRowProjection } from "../../session-row-projection-access.js";
-import { prepareTalkAgentConsultTranscript } from "../agent-consult-transcript.js";
 import { preparedTalkSessionProjection as projection } from "../test-helpers.js";
 import { createBrowserProvider, createBrowserSessionMock } from "./client-fixtures.test-support.js";
 import { forgetLegacyVoiceBinding } from "./client-legacy-voice-bindings.js";
@@ -50,7 +51,7 @@ const mocks = vi.hoisted(() => ({
   getCanonicalUserPreferences: vi.fn<
     () => Promise<{ profileId: string; entries: Record<string, unknown> } | undefined>
   >(async () => undefined),
-  readConfigFileSnapshot: vi.fn(),
+  projectConfigOntoRuntimeSourceSnapshot: vi.fn<(config: OpenClawConfig) => OpenClawConfig>(),
   canonicalizeSpeechProviderId: vi.fn((providerId: string | undefined) => providerId),
   getSpeechProvider: vi.fn(),
   listSpeechProviders: vi.fn(() => []),
@@ -66,7 +67,7 @@ const mocks = vi.hoisted(() => ({
   listRealtimeTranscriptionProviders: vi.fn(() => []),
   resolveConfiguredRealtimeVoiceProviderAsync: vi.fn(),
   isRealtimeVoiceProviderConfiguredAsync: vi.fn(
-    ({
+    async ({
       provider,
       cfg,
       providerConfig,
@@ -105,6 +106,7 @@ const mocks = vi.hoisted(() => ({
         release = registeredRelease;
       });
       return {
+        run: { runId: "run-voice-1", sessionKey: "agent:main:main" },
         release,
         isCurrent: () => true,
         abortIfCurrent: () => {},
@@ -155,8 +157,9 @@ const mocks = vi.hoisted(() => ({
   agentRuntime: {},
 }));
 
-vi.mock("../../../config/config.js", () => ({
-  readConfigFileSnapshot: mocks.readConfigFileSnapshot,
+vi.mock("../../../config/config.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../config/config.js")>()),
+  projectConfigOntoRuntimeSourceSnapshot: mocks.projectConfigOntoRuntimeSourceSnapshot,
 }));
 
 vi.mock("../../../state/user-preferences.js", async (importOriginal) => ({
@@ -338,12 +341,7 @@ vi.mock("../transcription-relay.js", async (importOriginal) => {
 });
 
 function setSourceConfig(config: OpenClawConfig) {
-  mocks.readConfigFileSnapshot.mockResolvedValue({
-    path: "/tmp/openclaw.json",
-    hash: "test-hash",
-    valid: true,
-    config,
-  });
+  mocks.projectConfigOntoRuntimeSourceSnapshot.mockReturnValue(config);
 }
 
 const callTalkHandler = createTalkHandlerCaller(talkHandlers);
@@ -1194,7 +1192,7 @@ describe("talk.speak handler", () => {
         return;
       }
       expect(mocks.getRuntimeConfig).not.toHaveBeenCalled();
-      expect(mocks.readConfigFileSnapshot).not.toHaveBeenCalled();
+      expect(mocks.projectConfigOntoRuntimeSourceSnapshot).not.toHaveBeenCalled();
       expectRecordFields(mockCallArg(mocks.synthesizeSpeech), {
         text: "Hello from talk mode.",
         disableFallback: true,
@@ -1215,6 +1213,46 @@ describe("talk.config handler", () => {
     vi.clearAllMocks();
   });
 
+  it("projects the matching applied source and canonical runtime fields", async () => {
+    const source: OpenClawConfig = {
+      ...createTalkConfig({ source: "env", provider: "default", id: "SYNTHETIC_TALK_KEY" }),
+      session: { mainKey: "ignored-legacy-key" },
+      ui: { seamColor: "${SYNTHETIC_ACCENT}" },
+    };
+    const runtime = captureRuntimeConfigWithSource(
+      {
+        ...createTalkConfig("synthetic-applied-key"),
+        session: { mainKey: "main" },
+        ui: { seamColor: "#123456" },
+      },
+      source,
+    );
+    mocks.projectConfigOntoRuntimeSourceSnapshot.mockImplementationOnce(
+      projectConfigOntoRuntimeSourceSnapshot,
+    );
+    mocks.getSpeechProvider.mockReturnValue({ id: "acme" });
+    const respond = vi.fn();
+    await callTalkHandler("talk.config", { params: {}, respond, config: runtime });
+    expect(expectRespondOk(respond)).toMatchObject({
+      config: {
+        session: { mainKey: "main" },
+        ui: { seamColor: "#123456" },
+        talk: {
+          providers: {
+            acme: {
+              apiKey: {
+                source: "__OPENCLAW_REDACTED__",
+                provider: "__OPENCLAW_REDACTED__",
+                id: "__OPENCLAW_REDACTED__",
+              },
+            },
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(respond.mock.calls)).not.toContain("synthetic-applied-key");
+  });
+
   it.each([
     ["talk:speech", false, true],
     ["talk:speech", true, false],
@@ -1229,7 +1267,7 @@ describe("talk.config handler", () => {
           : { source: "env", provider: "default", id: "MISSING" },
       );
       mocks.getSpeechProvider.mockReturnValue({ id: "acme" });
-      mocks.readConfigFileSnapshot.mockResolvedValue({ config: runtimeConfig });
+      setSourceConfig(runtimeConfig);
       const respond = vi.fn();
 
       await callTalkHandler("talk.config", {
@@ -1245,14 +1283,15 @@ describe("talk.config handler", () => {
 
   it.each(talkConfigAccentCases)("$name", async ({ profileId, profileAccent, expectedAccent }) => {
     markTalkOwnerCold("tts");
-    const runtimeConfig = createTalkConfig("healthy-talk-key");
+    const runtimeConfig = {
+      ...createTalkConfig("healthy-talk-key"),
+      ui: { seamColor: "#123456", prefs: { accent: "#52c99a" } },
+    };
     mocks.getSpeechProvider.mockReturnValue({ id: "acme" });
     mocks.getCanonicalUserPreferences.mockResolvedValue(
       profileId ? { profileId, entries: { "ui.accent": profileAccent } } : undefined,
     );
-    mocks.readConfigFileSnapshot.mockResolvedValue({
-      config: { ...runtimeConfig, ui: { seamColor: "#123456", prefs: { accent: "#52c99a" } } },
-    });
+    setSourceConfig(runtimeConfig);
     const respond = vi.fn();
 
     await callTalkHandler("talk.config", {
@@ -1276,65 +1315,57 @@ describe("talk.config handler", () => {
     }
   });
 
-  it("projects the runtime realtime transport when source config is invalid", async () => {
-    mocks.readConfigFileSnapshot.mockResolvedValue({
-      path: "/tmp/openclaw.json",
-      hash: "test-hash",
-      valid: false,
-      config: {},
-    });
-
-    const respond = vi.fn();
-    await callTalkHandler("talk.config", {
-      params: {},
-      client: { connect: { scopes: ["operator.read"] } },
-      respond,
-      config: {
+  it.each<{
+    name: string;
+    runtimeConfig: OpenClawConfig;
+    sourceConfig?: OpenClawConfig;
+    expected: Record<string, unknown>;
+    providerConfig?: Record<string, unknown>;
+  }>([
+    {
+      name: "runtime transport absent from source",
+      runtimeConfig: { talk: { realtime: { transport: "provider-websocket" } } },
+      sourceConfig: {},
+      expected: { transport: "provider-websocket" },
+    },
+    {
+      name: "unavailable non-OpenAI model without a bundled projector",
+      runtimeConfig: {
         talk: {
-          realtime: { transport: "provider-websocket" },
-        },
-      } as OpenClawConfig,
-    });
-
-    const response = expectRespondOk(respond) as { config?: { talk?: Record<string, unknown> } };
-    expectRecordFields(response.config?.talk?.realtime, {
-      transport: "provider-websocket",
-    });
-  });
-
-  it("preserves unavailable non-OpenAI realtime models without a bundled projector", async () => {
-    const runtimeConfig = {
-      talk: {
-        realtime: {
-          provider: "other-realtime",
-          model: "other-live-model",
-          providers: {
-            "other-realtime": { model: "other-live-model", voice: "other-voice" },
+          realtime: {
+            provider: "other-realtime",
+            model: "other-live-model",
+            providers: {
+              "other-realtime": { model: "other-live-model", voice: "other-voice" },
+            },
           },
         },
       },
-    } as OpenClawConfig;
-    setSourceConfig(runtimeConfig);
-    mocks.listRealtimeVoiceProviders.mockReturnValue([]);
-    const respond = vi.fn();
-
-    await callTalkHandler("talk.config", {
-      params: {},
-      client: { connect: { scopes: ["operator.read"] } },
-      respond,
-      config: runtimeConfig,
-    });
-
-    const response = expectRespondOk(respond) as { config?: { talk?: Record<string, unknown> } };
-    const realtime = expectRecordFields(response.config?.talk?.realtime, {
-      provider: "other-realtime",
-      model: "other-live-model",
-    });
-    expectRecordFields((realtime.providers as Record<string, unknown>)["other-realtime"], {
-      model: "other-live-model",
-      voice: "other-voice",
-    });
-  });
+      expected: { provider: "other-realtime", model: "other-live-model" },
+      providerConfig: { model: "other-live-model", voice: "other-voice" },
+    },
+  ])(
+    "projects realtime config: $name",
+    async ({ runtimeConfig, sourceConfig, expected, providerConfig }) => {
+      setSourceConfig(sourceConfig ?? runtimeConfig);
+      mocks.listRealtimeVoiceProviders.mockReturnValue([]);
+      const respond = vi.fn();
+      await callTalkHandler("talk.config", {
+        params: {},
+        client: { connect: { scopes: ["operator.read"] } },
+        respond,
+        config: runtimeConfig,
+      });
+      const response = expectRespondOk(respond) as { config?: { talk?: Record<string, unknown> } };
+      const realtime = expectRecordFields(response.config?.talk?.realtime, expected);
+      if (providerConfig) {
+        expectRecordFields(
+          (realtime.providers as Record<string, unknown>)["other-realtime"],
+          providerConfig,
+        );
+      }
+    },
+  );
 
   defineRealtimeConfigProjectionTests(async (runtimeConfig, includeSecrets) => {
     setSourceConfig(runtimeConfig);
@@ -2095,6 +2126,7 @@ describe("talk.session unified handlers", () => {
     expect(mocks.stopTalkRealtimeRelaySession).toHaveBeenCalledWith({
       relaySessionId: "relay-unified-1",
       connId: "conn-1",
+      disposition: undefined,
     });
     expect(closeRespond).toHaveBeenCalledWith(true, { ok: true }, undefined);
     const closedSession = vi.fn();
@@ -2939,7 +2971,7 @@ describe("talk.client.toolCall handler", () => {
           ? undefined
           : ["read", "web_search", "web_fetch", "x_search", "memory_search", "memory_get"],
         transcript: { display: false, excludeFromContext: true },
-        prepareAssistantTranscriptMessage: prepareTalkAgentConsultTranscript,
+        prepareAssistantTranscriptMessage: expect.any(Function),
         beforeDispatch: expect.any(Function),
       });
       const response = expectRespondOk(respond, { runId: "run-voice-1" });
@@ -2992,6 +3024,11 @@ describe("talk.client.toolCall handler", () => {
         args: { question: "What now?" },
       },
       respond,
+      context: {
+        getRuntimeConfig: () => ({}),
+        chatAbortControllers: new Map([["run-voice-1", { sessionId: "session-main" }]]),
+        logGateway: { warn: vi.fn() },
+      },
     });
 
     expect(mocks.registerTalkRealtimeRelayAgentRun).toHaveBeenCalledWith({
@@ -3000,6 +3037,7 @@ describe("talk.client.toolCall handler", () => {
       sessionKey: "agent:main:main",
       runId: "run-voice-1",
       callId: "call-1",
+      transcriptSessionId: "session-main",
       assertCurrent: expect.any(Function),
       registerVoice: expect.any(Function),
     });

@@ -19,13 +19,11 @@ export function createSkillLoadDiagnostics() {
       omitted += 1;
       return;
     }
-    items.push(
-      structuredClone({
-        kind: diagnostic.kind,
-        path: truncateUtf16WithEllipsis(diagnostic.path, MAX_DIAGNOSTIC_PATH_CHARS),
-        message: truncateUtf16WithEllipsis(diagnostic.message, MAX_DIAGNOSTIC_MESSAGE_CHARS),
-      }),
-    );
+    items.push({
+      kind: diagnostic.kind,
+      path: truncateUtf16WithEllipsis(diagnostic.path, MAX_DIAGNOSTIC_PATH_CHARS),
+      message: truncateUtf16WithEllipsis(diagnostic.message, MAX_DIAGNOSTIC_MESSAGE_CHARS),
+    });
   };
   return {
     add,
@@ -41,7 +39,7 @@ export function createSkillLoadDiagnostics() {
     },
     snapshot(): SkillLoadDiagnostics {
       return {
-        items: items.map((item) => ({ kind: item.kind, path: item.path, message: item.message })),
+        items: [...items],
         omitted,
       };
     },

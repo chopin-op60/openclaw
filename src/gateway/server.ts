@@ -25,6 +25,11 @@ export async function startGatewayServer(
   port = 18789,
   opts: GatewayServerOptions = {},
 ): ReturnType<typeof import("./server-start.js").startGatewayServerCore> {
+  const { installGatewayDatabaseEngine } = await import("./server-database-engine.js");
+  await installGatewayDatabaseEngine(
+    opts.startupConfigSnapshotRead?.snapshot,
+    opts.startupConfigSnapshotRead?.databaseEngineSelection,
+  );
   const { initializeSqliteRuntimeCapabilities } = await import("../infra/bun-sqlite-library.js");
   await initializeSqliteRuntimeCapabilities();
   const { acquireGatewayLock } = await import("../infra/gateway-lock.js");
@@ -70,7 +75,10 @@ export async function startGatewayServer(
         closeServer({ reason: String(reason) }),
       );
     }
-    return { ...server, close };
+    return {
+      ...server,
+      close: closeServer,
+    };
   } catch (error) {
     detachOwner?.();
     if (!close && !(error instanceof GatewayStartupCleanupError)) {
@@ -145,7 +153,14 @@ async function startGatewayServerWithRuntime(
   const closeBroker = async () => {
     // A failed required core join can stop before the admission sidecar runs.
     await stopDatabaseAdmission?.();
-    await broker.close();
+    try {
+      const { closeSqliteReadOnlyWorkersForBroker } =
+        await import("../infra/sqlite-readonly-worker.js");
+      await closeSqliteReadOnlyWorkersForBroker(broker);
+    } finally {
+      // Readers that did not close remain attached children for broker termination.
+      await broker.close();
+    }
   };
   try {
     const { createSubsystemLogger } = await import("../logging/subsystem.js");

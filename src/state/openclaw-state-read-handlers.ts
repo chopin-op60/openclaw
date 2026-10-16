@@ -1,4 +1,3 @@
-import type { DatabaseSync } from "node:sqlite";
 import {
   prepareAcpSessionMetadataRead,
   readAcpSessionCommand,
@@ -14,6 +13,7 @@ import {
   readClawOrphanWorkspaceInDatabase,
   readClawPackageRefsInDatabase,
 } from "../claws/provenance-read.kernel.js";
+import { readClawStateCommandInDatabase } from "../claws/state-read.kernel.js";
 import {
   isCronStateReadCommand,
   readCronStateCommandInDatabase,
@@ -32,7 +32,11 @@ import {
   listCronStandingGrantsInDatabase,
   lookupCronStandingGrantInDatabase,
 } from "../gateway/operator-approval-standing-grants.worker.js";
-import { listTerminalOperatorApprovalsInDatabase } from "../gateway/operator-approval-store.kernel.worker.js";
+import {
+  readOperatorApprovalReplayInDatabase,
+  readPendingOperatorApprovalsInDatabase,
+  listTerminalOperatorApprovalsInDatabase,
+} from "../gateway/operator-approval-store.kernel.worker.js";
 import { readSessionGroupCatalogSnapshot } from "../gateway/session-group-catalog.kernel.js";
 import { readSessionGroupMembership } from "../gateway/session-group-membership.read.js";
 import {
@@ -51,6 +55,7 @@ import { executeDevicePairingRead } from "../infra/device-pairing-read.kernel.js
 import { readExecApprovalsConfigRow } from "../infra/exec-approvals-sqlite.js";
 import { inspectCurrentConversationBindingRecordInDatabase } from "../infra/outbound/current-conversation-bindings.kernel.js";
 import { readOutboundDeliveriesInDatabase } from "../infra/outbound/delivery-queue-storage.kernel.js";
+import type { EngineConnection } from "../infra/sql-connection.js";
 import { runSqliteDeferredTransactionSync } from "../infra/sqlite-transaction.js";
 import {
   readInterruptedUpdateCandidate,
@@ -67,6 +72,8 @@ import {
   pluginBlobLookupInDatabase,
   pluginBlobEntriesInDatabase,
 } from "../plugin-state/plugin-blob-store.sqlite.js";
+import { isPluginStateReadCommand } from "../plugin-state/plugin-state-worker-contract.js";
+import { readPluginStateCommand } from "../plugin-state/plugin-state.worker.js";
 import {
   selectSkillLibraryRevisionMetadataBatch,
   selectSkillLibraryRevisionManifestsBatch,
@@ -100,8 +107,9 @@ import type {
 import { findSessionRepositoryWorkspaceInDatabase } from "./session-repository-workspaces.kernel.js";
 import { readUserBackgroundCommand } from "./user-background.kernel.js";
 import { readUserModelAccountCommand } from "./user-model-accounts.read.worker.js";
-import { selectUserPreferenceValues } from "./user-preferences.store.js";
+import { readUserPreferences, selectUserPreferenceValues } from "./user-preferences.store.js";
 import { readUserProfileCommand } from "./user-profile-read.worker.js";
+import { selectResolvedUserProfileMetadataById } from "./user-profiles-internal.js";
 
 export {
   prepareAcpSessionMetadataRead,
@@ -113,7 +121,7 @@ export {
 
 /** Non-metadata query owners load only when the shared worker receives one of their commands. */
 export function readOpenClawStateDatabaseCommand(
-  db: DatabaseSync,
+  db: EngineConnection,
   input: OpenClawStateReadRequest,
   command: Exclude<
     OpenClawStateReadRequest["command"],
@@ -130,6 +138,9 @@ export function readOpenClawStateDatabaseCommand(
   >,
   metadataRead: ReturnType<typeof prepareAcpSessionMetadataRead> | undefined,
 ): OpenClawStateReadResult {
+  if (command.type === "claws.inventory") {
+    return readClawStateCommandInDatabase(db, command);
+  }
   if (command.type === "claws.packageOwnership") {
     const install =
       command.agentId === undefined
@@ -220,6 +231,9 @@ export function readOpenClawStateDatabaseCommand(
     command.type === "devicePairing.bootstrapContext"
   ) {
     return executeDevicePairingRead(db, input.databasePath, command);
+  }
+  if (isPluginStateReadCommand(command)) {
+    return readPluginStateCommand({ db, path: input.databasePath }, command);
   }
   if (command.type === "pluginBlob.lookup") {
     return {
@@ -312,6 +326,15 @@ export function readOpenClawStateDatabaseCommand(
   if (command.type === "operatorApprovals.placementGrant") {
     return { type: command.type, rows: readPlacementGrantRows(db, command.input) };
   }
+  if (command.type === "operatorApprovals.pending") {
+    return {
+      type: command.type,
+      pending: readPendingOperatorApprovalsInDatabase(command.input, db),
+    };
+  }
+  if (command.type === "operatorApprovals.prepareReplay") {
+    return { type: command.type, replay: readOperatorApprovalReplayInDatabase(command.input, db) };
+  }
   if (command.type === "operatorApprovals.history") {
     return {
       type: command.type,
@@ -355,13 +378,12 @@ export function readOpenClawStateDatabaseCommand(
     };
   }
   if (command.type === "githubPublication.sharedObservation") {
-    const { kind, session, selector, entry } = command.input;
+    const { session, selector, entry } = command.input;
     return {
       type: command.type,
       row:
-        kind === "repository"
-          ? readSharedRepositoryGitHubPublicationInDatabase(db, session, selector, entry)
-          : readSharedGitHubPublicationRequestInDatabase(db, session, selector, entry),
+        readSharedRepositoryGitHubPublicationInDatabase(db, session, selector, entry) ??
+        readSharedGitHubPublicationRequestInDatabase(db, session, selector, entry),
     };
   }
   if (command.type === "githubPublication.request") {
@@ -407,7 +429,26 @@ export function readOpenClawStateDatabaseCommand(
       values: selectUserPreferenceValues(db, command.profileIds, command.key),
     };
   }
+  if (command.type === "userPreferences.read") {
+    return {
+      type: command.type,
+      preferences: runSqliteDeferredTransactionSync(db, () => {
+        const profile = tableExists(db, "user_profiles")
+          ? selectResolvedUserProfileMetadataById(db, command.profileId)
+          : undefined;
+        return profile
+          ? {
+              profileId: profile.id,
+              entries: tableExists(db, "user_preferences")
+                ? readUserPreferences(db, profile.id, command.keys)
+                : {},
+            }
+          : undefined;
+      }),
+    };
+  }
   if (
+    command.type === "userModelAccounts.authorization" ||
     command.type === "userModelAccounts.links" ||
     command.type === "userModelAccounts.summary" ||
     command.type === "userModelAccounts.selection" ||
