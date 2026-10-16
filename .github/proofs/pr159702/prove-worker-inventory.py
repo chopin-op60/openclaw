@@ -259,7 +259,7 @@ class Proof:
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             self.port = reservation.getsockname()[1]
-        agent = {"workspace": str(self.workspace), "default": True}
+        agent = {"workspace": str(self.workspace)}
         agents = {"defaults": {"workspace": str(self.workspace)}}
         if self.agent_schema == "entries":
             agents["entries"] = {"main": agent}
