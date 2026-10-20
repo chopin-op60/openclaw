@@ -70,6 +70,7 @@ import {
 } from "../context.js";
 import { authorizeSlackDirectMessage } from "../dm-auth.js";
 import type { SlackEventScope } from "../event-scope.js";
+import { getOrCreateWeakOwnerMap } from "../lru-map-cache.js";
 import type { SlackMediaResult } from "../media-types.js";
 import { escapeSlackMrkdwn } from "../mrkdwn.js";
 import { resolveSlackRoomContextHints } from "../room-context.js";
@@ -196,11 +197,7 @@ function resolveCachedMentionRegexes(
     normalizeOptionalString(options?.conversationId ?? undefined),
     options?.providerPolicy ? JSON.stringify(options.providerPolicy) : "",
   ].join("\u001f");
-  let byAgent = mentionRegexCache.get(ctx);
-  if (!byAgent) {
-    byAgent = new Map<string, RegExp[]>();
-    mentionRegexCache.set(ctx, byAgent);
-  }
+  const byAgent = getOrCreateWeakOwnerMap(mentionRegexCache, ctx);
   const cached = byAgent.get(key);
   if (cached) {
     return cached;
@@ -707,7 +704,7 @@ export async function prepareSlackMessage(params: {
   const hasBoundSession = Boolean(
     routing.runtimeBoundSessionKey || routing.configuredBindingSessionKey,
   );
-  const { configuredBinding, configuredBindingSessionKey } = routing;
+  const { configuredBinding } = routing;
   const isAssistantThreadMessage = Boolean(isDirectMessage && messageAssistantThreadContext);
   const shouldForceAssistantReplyThread = Boolean(
     assistantThreadContext?.threadTs &&
@@ -717,23 +714,12 @@ export async function prepareSlackMessage(params: {
     ? assistantThreadContext?.threadTs
     : undefined;
   const forcedReplyThreadTs = agentViewThreadTs ?? forcedAssistantReplyThreadTs;
-  if (routing.runtimeBinding && shouldLogVerbose()) {
-    logVerbose(
-      `slack: routed via bound conversation ${routing.runtimeBinding.conversation.conversationId} -> ${routing.runtimeBinding.targetSessionKey}`,
-    );
-  }
   if (configuredBinding) {
     const ensured = await ensureConfiguredBindingRouteReady({
       cfg,
       bindingResolution: configuredBinding,
     });
-    if (ensured.ok) {
-      if (shouldLogVerbose()) {
-        logVerbose(
-          `slack: using configured ACP binding for ${configuredBinding.record.conversation.conversationId} -> ${configuredBindingSessionKey}`,
-        );
-      }
-    } else {
+    if (!ensured.ok) {
       if (shouldLogVerbose()) {
         logVerbose(
           `slack: configured ACP binding unavailable for ${configuredBinding.record.conversation.conversationId}: ${ensured.error}`,
@@ -1505,12 +1491,6 @@ export async function prepareSlackMessage(params: {
       originatingTo: preflightChannelTarget,
       messageThreadId: threadContext.messageThreadId,
     });
-  }
-
-  if (shouldLogVerbose()) {
-    logVerbose(
-      `slack inbound: account=${route.accountId} agent=${route.agentId} channel=${message.channel} message_ts=${message.ts ?? "unknown"} thread_ts=${effectiveMessageThreadId ?? "none"} from=${slackFrom} chat=${chatType} chars=${rawBody.length}`,
-    );
   }
 
   const updateLastRouteSessionKey = resolveInboundLastRouteSessionKey({ route, sessionKey });

@@ -1,5 +1,4 @@
 import { resolveGeneratedMediaMaxBytes } from "openclaw/plugin-sdk/media-generation-runtime";
-import { resolveApiKeyForProvider } from "openclaw/plugin-sdk/provider-auth-runtime";
 import {
   createProviderOperationDeadline,
   executeProviderOperationWithRetry,
@@ -13,13 +12,13 @@ import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
   normalizeVideoGenerationDuration,
-  selectSupportedVideoDuration,
   type GeneratedVideoAsset,
   type VideoGenerationProvider,
   type VideoGenerationRequest,
 } from "openclaw/plugin-sdk/video-generation";
 import { canonicalizeGoogleProviderBase64 } from "./base64.js";
 import { parseGeminiAuth } from "./gemini-auth.js";
+import { resolveGoogleGenerationApiKey } from "./generation-auth.js";
 import {
   createGoogleVideoGenerationProviderMetadata,
   DEFAULT_GOOGLE_VIDEO_MODEL,
@@ -96,14 +95,6 @@ function resolveResolution(params: {
   }
   const maxEdge = Math.max(parsedSize.width, parsedSize.height);
   return maxEdge >= 1920 ? "1080p" : maxEdge >= 1280 ? "720p" : undefined;
-}
-
-function resolveDurationSeconds(durationSeconds: number | undefined): number | undefined {
-  const rounded = normalizeVideoGenerationDuration({ durationSeconds });
-  if (rounded === undefined) {
-    return undefined;
-  }
-  return selectSupportedVideoDuration(rounded, GOOGLE_VIDEO_ALLOWED_DURATION_SECONDS);
 }
 
 function resolveInputImage(req: VideoGenerationRequest) {
@@ -286,54 +277,41 @@ async function requestGoogleVideoJson(params: {
     provider: "google",
     stage: params.stage,
     operation: async () => {
-      const controller = new AbortController();
-      const timeout = setTimeout(
-        () => {
-          const error = new Error("request timed out");
-          error.name = "TimeoutError";
-          controller.abort(error);
+      const { response, release } = await fetchWithSsrFGuard({
+        url: params.url,
+        init: {
+          method: params.method,
+          headers: params.headers,
+          ...(params.body === undefined ? {} : { body: JSON.stringify(params.body) }),
         },
-        resolveProviderOperationTimeoutMs({
+        timeoutMs: resolveProviderOperationTimeoutMs({
           deadline: params.deadline,
           defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
         }),
-      );
+      });
       try {
-        const { response, release } = await fetchWithSsrFGuard({
-          url: params.url,
-          init: {
-            method: params.method,
-            headers: params.headers,
-            ...(params.body === undefined ? {} : { body: JSON.stringify(params.body) }),
-          },
-          signal: controller.signal,
-        });
-        try {
-          if (!response.ok) {
-            const text = new TextDecoder().decode(
-              await readResponseWithLimit(response, GOOGLE_VIDEO_OPERATION_RESPONSE_MAX_BYTES, {
-                onOverflow: ({ maxBytes }) =>
-                  new Error(`Google video operation response exceeds ${maxBytes} bytes`),
-              }),
-            );
-            let detail: unknown = text;
-            if (text) {
-              try {
-                detail = JSON.parse(text) as unknown;
-              } catch {
-                detail = text;
-              }
+        if (!response.ok) {
+          const text = new TextDecoder().decode(
+            await readResponseWithLimit(response, GOOGLE_VIDEO_OPERATION_RESPONSE_MAX_BYTES, {
+              onOverflow: ({ maxBytes }) =>
+                new Error(`Google video operation response exceeds ${maxBytes} bytes`),
+            }),
+          );
+          let detail: unknown = text;
+          if (text) {
+            try {
+              detail = JSON.parse(text) as unknown;
+            } catch {
+              detail = text;
             }
-            throw createHttpError(response, detail);
           }
-          return await readProviderJsonResponse(response, "Google video operation response", {
-            maxBytes: GOOGLE_VIDEO_OPERATION_RESPONSE_MAX_BYTES,
-          });
-        } finally {
-          await release();
+          throw createHttpError(response, detail);
         }
+        return await readProviderJsonResponse(response, "Google video operation response", {
+          maxBytes: GOOGLE_VIDEO_OPERATION_RESPONSE_MAX_BYTES,
+        });
       } finally {
-        clearTimeout(timeout);
+        await release();
       }
     },
   });
@@ -409,16 +387,7 @@ export function buildGoogleVideoGenerationProvider(): VideoGenerationProvider {
           "Google video generation does not support image and video inputs together.",
         );
       }
-      const auth = await resolveApiKeyForProvider({
-        provider: "google",
-        cfg: req.cfg,
-        agentDir: req.agentDir,
-        store: req.authStore,
-      });
-      if (!auth.apiKey) {
-        throw new Error("Google API key missing");
-      }
-      const apiKey = auth.apiKey;
+      const apiKey = await resolveGoogleGenerationApiKey(req);
 
       const configuredUrl = normalizeOptionalString(req.cfg?.models?.providers?.google?.baseUrl);
       const configuredBaseUrl = configuredUrl
@@ -434,7 +403,10 @@ export function buildGoogleVideoGenerationProvider(): VideoGenerationProvider {
           transport: "http",
         }),
       };
-      const durationSeconds = resolveDurationSeconds(req.durationSeconds);
+      const durationSeconds = normalizeVideoGenerationDuration({
+        durationSeconds: req.durationSeconds,
+        supportedDurationSeconds: GOOGLE_VIDEO_ALLOWED_DURATION_SECONDS,
+      });
       const model = normalizeOptionalString(req.model) || DEFAULT_GOOGLE_VIDEO_MODEL;
       const aspectRatio = resolveAspectRatio({ aspectRatio: req.aspectRatio, size: req.size });
       const resolution = resolveResolution({ resolution: req.resolution, size: req.size });

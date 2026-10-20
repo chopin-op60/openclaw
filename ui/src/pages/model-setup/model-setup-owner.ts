@@ -1,4 +1,4 @@
-import { createEffect, onCleanup, onSettled, untrack } from "solid-js";
+import { createEffect, onCleanup, onSettled } from "solid-js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type {
   SystemAgentSetupActivateParams,
@@ -7,9 +7,8 @@ import type {
 } from "../../api/types.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { hasOperatorAdminAccess } from "../../app/operator-access.ts";
-import { t } from "../../i18n/index.ts";
-import { i18n } from "../../i18n/lib/translate.ts";
 import { isGatewayMethodAdvertised } from "../../lib/gateway-methods.ts";
+import { i18nRevision, t } from "../../lib/reactive/i18n.ts";
 import { projectOwner } from "../../lib/reactive/projection.ts";
 import { readSessionDefaults } from "../../lib/sessions/session-key.ts";
 import { createModelProviderLogin } from "../model-providers/login-controller.ts";
@@ -40,7 +39,6 @@ import {
   mapActivationResult,
   type ModelSetupActivationState,
 } from "./state.ts";
-import type { ModelSetupViewProps } from "./view.tsx";
 import { ModelSetupWizardRunner, type ModelSetupWizardCompletion } from "./wizard-runner.ts";
 
 export type ModelSetupPageProps = {
@@ -55,14 +53,13 @@ export function createModelSetup(
   props: ModelSetupPageProps & { host: HTMLElement },
   context: ApplicationContext,
 ) {
-  const listeners = new Set<() => void>();
+  let publish: (() => void) | undefined;
   let connected = false;
   let disposed = false;
   const notify = () => {
     if (!disposed) {
-      for (const listener of listeners) {
-        listener();
-      }
+      publish?.();
+      onSettled(afterRender);
     }
   };
   const actionsDisabled = (): boolean =>
@@ -604,20 +601,33 @@ export function createModelSetup(
     }
   }
 
-  function viewProps(): ModelSetupViewProps {
+  const projection = projectOwner(
+    {
+      subscribe(listener: () => void) {
+        publish = listener;
+        return () => {
+          publish = undefined;
+        };
+      },
+    },
+    () => state,
+  );
+  const view = () => {
+    i18nRevision();
+    projection.read();
     const snapshot = context.gateway.snapshot;
     const canAdmin = hasOperatorAdminAccess(snapshot.hello?.auth ?? null);
     const gatewayTooOld =
       snapshot.phase === "connected" &&
       isGatewayMethodAdvertised(snapshot, "openclaw.setup.detect") !== true;
     return {
-      onManualInput: (element) => {
+      onManualInput: (element: HTMLInputElement) => {
         manualInput = element;
       },
-      onFeedback: (element) => {
+      onFeedback: (element: HTMLDivElement) => {
         feedback = element;
       },
-      onWizardDialog: (element) => {
+      onWizardDialog: (element: import("../../components/modal-dialog.ts").OpenClawModalDialog) => {
         wizardDialog = element;
       },
       detecting: state.detectionRequest !== null,
@@ -652,7 +662,7 @@ export function createModelSetup(
       cancellationNotice: state.cancellationNotice,
       activationUnresolved: firstRun.unresolved,
       onUseCurrentModel: firstRun.canUseCurrentModel
-        ? () => void firstRun.useCurrentModel()
+        ? (): void => void firstRun.useCurrentModel()
         : undefined,
       actionsDisabled: actionsDisabled(),
       manualProviderId: state.manualProviderId,
@@ -661,7 +671,8 @@ export function createModelSetup(
       moreSignInOpen: state.moreSignInOpen,
       nativeSessionCatalogsEnabled: state.nativeSessionCatalogsEnabled,
       nativeModels,
-      onNativeSessionCatalogsChange: (enabled) => setState("nativeSessionCatalogsEnabled", enabled),
+      onNativeSessionCatalogsChange: (enabled: boolean) =>
+        setState("nativeSessionCatalogsEnabled", enabled),
       firstRun: props.routeData?.firstRun === true,
       iconUrls: state.iconUrls,
       onDetect: () => {
@@ -669,13 +680,13 @@ export function createModelSetup(
           void detect();
         }
       },
-      onVerify: () => void firstRun.verify(),
-      onActivateCandidate: (candidate) =>
+      onVerify: (): void => void firstRun.verify(),
+      onActivateCandidate: (candidate: SystemAgentSetupDetectResult["candidates"][number]): void =>
         void activate(
           candidateActivation(candidate),
           activationTargetId(candidate.kind, candidate.modelRef),
         ),
-      onStartAuth: (option) => {
+      onStartAuth: (option: NonNullable<SystemAgentSetupDetectResult["authOptions"]>[number]) => {
         wizard.prepareSignIn(option.kind, option.label);
         pendingPrepareOption = null;
         setState("wizardMode", "auth");
@@ -693,14 +704,14 @@ export function createModelSetup(
         setState("wizardMode", "prepare");
         void runWizardMutation(() => wizard.start(option.id, "openclaw.setup.prepare.start"));
       },
-      onManualProviderChange: (providerId) => selectManualProvider(providerId),
-      onManualApiKeyChange: (apiKey) => {
+      onManualProviderChange: (providerId: string) => selectManualProvider(providerId),
+      onManualApiKeyChange: (apiKey: string) => {
         setState("manualApiKey", apiKey);
         setState("manualError", null);
       },
       onManualConnect: () => connectManual(),
-      onMoreSignInToggle: (open) => setState("moreSignInOpen", open),
-      onIconError: (iconUrl) => iconLoader.invalidate(iconUrl),
+      onMoreSignInToggle: (open: boolean) => setState("moreSignInOpen", open),
+      onIconError: (iconUrl: string) => iconLoader.invalidate(iconUrl),
       onOpenChat: () => (props.embedded ? props.onClose?.() : firstRun.continueSetup()),
       onOpenSetupAssistant: () => firstRun.continueSetup("utility"),
       onSuccessClose: () => {
@@ -711,58 +722,41 @@ export function createModelSetup(
         setState("activationState", { phase: "idle" });
         void detect();
       },
-      onWizardValueChange: (value) => setState("wizardDraft", { ...state.wizardDraft, value }),
-      onWizardAnswer: (value, includeValue) =>
+      onWizardValueChange: (value: unknown) =>
+        setState("wizardDraft", { ...state.wizardDraft, value }),
+      onWizardAnswer: (value: unknown, includeValue?: boolean): void =>
         void runWizardMutation(() => wizard.answer(value, includeValue)),
-      onWizardCancel: () => void cancelWizard(),
+      onWizardCancel: (): void => void cancelWizard(),
       onWizardClose: () => closeWizard(),
     };
-  }
-
-  const projection = projectOwner(
-    {
-      subscribe(listener: () => void) {
-        listeners.add(listener);
-        return () => listeners.delete(listener);
-      },
-    },
-    () => state,
-  );
-  const view = () => {
-    projection.read();
-    return viewProps();
   };
   createEffect(
     () => [props.routeData, agentSelection()],
     ([, selection]) => {
-      // Reconcile current request authority without subscribing the imperative work.
-      return untrack(() => {
-        const stop = selection.subscribe(() => {
-          synchronizeGateway(context.gateway.snapshot);
-          notify();
-        });
+      // Selection receipts retire wizard ownership before another setup action can run.
+      const stop = selection.subscribe(() => {
         synchronizeGateway(context.gateway.snapshot);
         notify();
-        return stop;
       });
+      synchronizeGateway(context.gateway.snapshot);
+      notify();
+      return stop;
     },
   );
-  // DOM settlement starts imperative first-run work; view() owns its dependencies.
-  createEffect(view, () => untrack(afterRender));
   onSettled(() => {
     connected = true;
+    // Connection authority changes synchronously suspend or retire the admitted wizard.
     const stopGateway = context.gateway.subscribe(() => {
       synchronizeGateway(context.gateway.snapshot);
       notify();
     });
+    // Receipt-clear events retire restored wizard work before another activation can start.
     const stopFirstRun = firstRun.subscribe(notify);
-    const stopLocale = i18n.subscribe(notify);
     synchronizeGateway(context.gateway.snapshot);
     notify();
     return () => {
       stopGateway();
       stopFirstRun();
-      stopLocale();
     };
   });
   onCleanup(() => {

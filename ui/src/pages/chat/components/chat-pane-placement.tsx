@@ -1,8 +1,8 @@
 import { createMemo, For, Show } from "solid-js";
 import type { GatewaySessionRow } from "../../../api/types.ts";
 import type { ApplicationPlacementStartupStatus } from "../../../app/session-placement-startup.ts";
-import "../../../components/elapsed-time.tsx";
 import { resolveCloudWorkerStopAction } from "../../../components/cloud-worker-stop.ts";
+import { ElapsedTime } from "../../../components/elapsed-time.tsx";
 import {
   repositorySessionNeedsWorker,
   sessionPlacementRetry,
@@ -118,7 +118,10 @@ export function ChatPanePlacement(props: {
         {
           id: "move",
           visible: placementState === "active" || Boolean(retry),
-          className: `chat-pane__placement-move ${destructiveMove ? "session-menu__item--destructive" : ""}`,
+          className: [
+            "chat-pane__placement-move",
+            { "session-menu__item--destructive": destructiveMove },
+          ],
           destructive: destructiveMove,
           disabledReason: moveDisabledReason,
           icon: "monitor" as const,
@@ -160,7 +163,7 @@ export function ChatPanePlacement(props: {
       .map((action) => ({
         id: action.id,
         label: action.label,
-        class: `session-menu__item ${action.className}`,
+        class: ["session-menu__item", action.className],
         variant: action.destructive ? "danger" : undefined,
         disabled: Boolean(action.disabledReason),
         attributes: { title: action.disabledReason },
@@ -247,7 +250,7 @@ export function ChatPanePlacement(props: {
                   <Show when={view().syncElapsed !== undefined}>
                     <div class="chat-pane__placement-note" role="status">
                       {t("sessionsView.syncingCloudFilesDetail")} ·{" "}
-                      <openclaw-elapsed-time prop:startMs={view().syncElapsed} />
+                      <ElapsedTime startMs={view().syncElapsed} />
                     </div>
                   </Show>
                 }

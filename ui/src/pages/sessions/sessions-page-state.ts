@@ -1,6 +1,6 @@
 import { parseStrictPositiveInteger } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import { createStore, onSettled } from "solid-js";
+import { onSettled } from "solid-js";
 import { createDeferredCore } from "../../../../src/shared/deferred.js";
 import type { GatewaySessionRow, SessionsListResult } from "../../api/types.ts";
 import { selectApplicationSession } from "../../app/agent-selection.ts";
@@ -9,10 +9,10 @@ import type { ApplicationContext } from "../../app/context.ts";
 import { requestCloudWorkerStop } from "../../components/cloud-worker-stop.runtime.ts";
 import { resolveCloudWorkerStopAction } from "../../components/cloud-worker-stop.ts";
 import { showConfirmDialog } from "../../components/confirm-dialog.ts";
-import { SessionDetailsController } from "../../components/session-details-controller.ts";
+import { createSessionDetails } from "../../components/session-details.ts";
 import { hasSessionArchiveDescendants } from "../../components/session-menu-descendants.ts";
 import { fetchSessionMenuWork } from "../../components/session-menu-work.ts";
-import "../../components/session-menu.ts";
+import "../../components/session-menu-solid.tsx";
 import { moveSessionFromMenu } from "../../components/session-placement-action.ts";
 import {
   formatBatchSessionRemovalError,
@@ -24,7 +24,8 @@ import { watchAgentScope } from "../../lib/agents/index.ts";
 import { formatUiError } from "../../lib/format-error.ts";
 import { canCallGatewayMethod } from "../../lib/gateway-methods.ts";
 import { GatewayPageBinding } from "../../lib/gateway-page-binding.ts";
-import { projectSource } from "../../lib/reactive/projection.ts";
+import { observeState } from "../../lib/reactive/observe-state.ts";
+import { projectOwner } from "../../lib/reactive/projection.ts";
 import {
   readSessionMethodAccess,
   type SessionMethodAccessRequest,
@@ -78,6 +79,7 @@ import {
   handleSessionManagementNavigationAction,
   type SessionsPageMenuProps,
 } from "./session-menu.tsx";
+import type { SessionsPageState } from "./sessions-page-state.types.ts";
 import type { SessionsProps } from "./view-types.ts";
 
 registerSessionOrganizationEnglish();
@@ -93,27 +95,6 @@ type SessionsPageListBinding = {
   transcriptKey: string;
 };
 
-type SessionsPageState = Pick<
-  SessionsProps,
-  | "result"
-  | "loading"
-  | "refreshing"
-  | "error"
-  | "activeMinutes"
-  | "limit"
-  | "includeGlobal"
-  | "includeUnknown"
-  | "statusFilter"
-  | "searchQuery"
-  | "transcriptSearchQuery"
-  | "expandedSessionKey"
-  | "transcriptSearch"
-> & {
-  selectedSessions: Map<string, SessionDeleteRow>;
-  sessionMenu: SessionsPageMenuProps["menu"] | null;
-  sessionMenuWork: SessionsPageMenuProps["work"];
-};
-
 export type SessionsPageOwner = ReturnType<typeof createSessionsPage>;
 
 export function createSessionsPage(
@@ -122,22 +103,7 @@ export function createSessionsPage(
 ) {
   let routeData = initialRouteData;
   let active = true;
-  let publish = () => {};
   const menuOwner = {};
-  const [presentation, setPresentation] = createStore<
-    Pick<SessionsProps, "sortColumn" | "sortDir" | "groupBy" | "page" | "pageSize">
-  >({
-    sortColumn: "updated",
-    sortDir: "desc",
-    groupBy: loadStoredGroupBy(),
-    page: 0,
-    pageSize: 25,
-  });
-  function resetPage() {
-    setPresentation((draft) => {
-      draft.page = 0;
-    });
-  }
   function setRouteData(next?: SessionsRouteData) {
     if (routeData === next) {
       return;
@@ -149,36 +115,31 @@ export function createSessionsPage(
   }
 
   // Query and mutation decisions read these facts synchronously; the projection only observes.
-  const state = new Proxy<SessionsPageState>(
-    {
-      result: null,
-      loading: false,
-      refreshing: false,
-      error: null,
-      activeMinutes: "",
-      limit: String(SESSIONS_PAGE_DEFAULT_LIMIT),
-      includeGlobal: true,
-      includeUnknown: false,
-      statusFilter: "active",
-      searchQuery: "",
-      transcriptSearchQuery: "",
-      selectedSessions: new Map<string, SessionDeleteRow>(),
-      sessionMenu: null,
-      sessionMenuWork: null,
-      expandedSessionKey: null,
-      transcriptSearch: { status: "idle" },
-    },
-    {
-      set: (target, key, value) => {
-        const changed = !Object.is(Reflect.get(target, key), value);
-        Reflect.set(target, key, value);
-        if (changed && active) {
-          publish();
-        }
-        return true;
-      },
-    },
-  );
+  const observation = observeState<SessionsPageState>({
+    sortColumn: "updated",
+    sortDir: "desc",
+    groupBy: loadStoredGroupBy(),
+    page: 0,
+    pageSize: 25,
+    result: null,
+    loading: false,
+    refreshing: false,
+    error: null,
+    activeMinutes: "",
+    limit: String(SESSIONS_PAGE_DEFAULT_LIMIT),
+    includeGlobal: true,
+    includeUnknown: false,
+    statusFilter: "active",
+    searchQuery: "",
+    transcriptSearchQuery: "",
+    selectedSessions: new Map<string, SessionDeleteRow>(),
+    sessionMenu: null,
+    sessionMenuWork: null,
+    expandedSessionKey: null,
+    transcriptSearch: { status: "idle" },
+  });
+  const state = observation.state;
+  const publish = observation.invalidate;
   // Route deep-link target (?session=...); unlike expandedSessionKey it also
   // narrows sessionListOptions so the linked session is guaranteed to load.
   let deepLinkSessionKey: string | null = null;
@@ -194,7 +155,7 @@ export function createSessionsPage(
   let listRequest: Promise<void> | undefined;
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let appliedListResult: SessionsListResult | null | undefined;
-  const details = new SessionDetailsController(() => publish(), {
+  const details = createSessionDetails({
     captureScope: captureRequestScope,
     isCurrent: isRequestScopeCurrent,
     row: () => state.result?.sessions.find((row) => row.key === state.expandedSessionKey),
@@ -208,7 +169,7 @@ export function createSessionsPage(
     retirePageOperations();
     resetTranscriptSearchState(state.transcriptSearchQuery);
     if (!deepLinkSessionKey) {
-      resetPage();
+      state.page = 0;
       state.selectedSessions = new Map();
       clearSearchTimer();
       bindSessionList();
@@ -414,7 +375,7 @@ export function createSessionsPage(
     state.includeUnknown = Boolean(data.expandedSessionKey);
     if (data.expandedSessionKey) {
       state.searchQuery = "";
-      resetPage();
+      state.page = 0;
       state.selectedSessions = new Map();
     }
     state.expandedSessionKey = data.expandedSessionKey;
@@ -477,7 +438,7 @@ export function createSessionsPage(
       details.synchronize();
       state.error = null;
       state.selectedSessions = new Map();
-      resetPage();
+      state.page = 0;
       listBinding = { sessions, query, key, transcriptKey };
       appliedListResult = undefined;
     }
@@ -613,7 +574,7 @@ export function createSessionsPage(
     state.limit = next.limit;
     state.includeGlobal = next.includeGlobal;
     state.includeUnknown = next.includeUnknown;
-    resetPage();
+    state.page = 0;
     state.selectedSessions = new Map();
     // Explicit filter edits leave deep-link mode; load the full roster.
     deepLinkSessionKey = null;
@@ -627,7 +588,7 @@ export function createSessionsPage(
     }
     state.statusFilter = statusFilter;
     clearSearchTimer();
-    resetPage();
+    state.page = 0;
     state.selectedSessions = new Map();
     deepLinkSessionKey = null;
     // Route navigation changes the managed query; mask the old view's rows
@@ -1072,15 +1033,15 @@ export function createSessionsPage(
               request,
             })
           : await request();
-      if (patched) {
+      if (patched && !("queued" in patched)) {
         options.onConfirmed?.(patched);
       }
       if (!isRequestScopeCurrent(scope)) {
         return "stale";
       }
-      if (!patched) {
-        state.error = scope.sessions.state.error;
-        return "failed";
+      if (!patched || "queued" in patched) {
+        state.error = patched ? null : scope.sessions.state.error;
+        return patched ? "completed" : "failed";
       }
       await refreshSessionList(scope);
       if (!isRequestScopeCurrent(scope)) {
@@ -1110,7 +1071,7 @@ export function createSessionsPage(
       return;
     }
     try {
-      const forkedKey = await scope.sessions.create(createParams);
+      const forkedKey = await scope.sessions.create(createParams, { signal: scope.signal });
       if (!isRequestScopeCurrent(scope)) {
         return;
       }
@@ -1247,7 +1208,15 @@ export function createSessionsPage(
             break;
           }
           case "toggle-unread":
-            void actions.patchSession(row.key, { unread: row.unread !== true });
+            void actions.patchSession(
+              row.key,
+              { unread: row.unread !== true },
+              undefined,
+              row.sessionId,
+              {
+                sessionScope: true,
+              },
+            );
             break;
           case "rename":
             void renameSession(row);
@@ -1351,38 +1320,32 @@ export function createSessionsPage(
     };
   }
 
-  function viewProps(): Omit<SessionsProps, keyof typeof presentation> {
+  function viewProps(): SessionsProps {
     const context = application;
+    const { selectedSessions, sessionMenuWork: _sessionMenuWork, ...viewState } = state;
     const personGroupingAvailable = (state.result?.owners?.length ?? 0) > 1;
     return {
-      loading: state.loading || details.loading,
-      refreshing: state.refreshing,
-      result: state.result,
-      error: details.error ?? state.error,
-      activeMinutes: state.activeMinutes,
-      limit: state.limit,
-      includeGlobal: state.includeGlobal,
-      includeUnknown: state.includeUnknown,
-      statusFilter: state.statusFilter,
+      ...viewState,
+      loading: state.loading || details.loading(),
+      refreshDisabled: context.gateway.snapshot.phase !== "connected",
+      error: details.error() ?? state.error,
       basePath: context.basePath,
       agentId: resolveSessionNavigationAgentId(context),
+      allAgentsScope: context.agentSelection.state.scopeId === null,
       mainKey: resolveUiConfiguredMainKey({
         agentsList: context.agents.state.agentsList,
         hello: context.gateway.snapshot.hello,
       }),
-      searchQuery: state.searchQuery,
       transcriptSearchAvailable: context.gateway.snapshot.phase === "connected",
-      transcriptSearchQuery: state.transcriptSearchQuery,
-      transcriptSearch: state.transcriptSearch,
       agentIdentityById: sessionAgentIdentityById(
         state.result,
         (agentId) => context.agentIdentity.get(agentId) ?? undefined,
       ),
       personGroupingAvailable,
+      // Keep the stored Person preference while the owner roster is unavailable.
+      groupBy: personGroupingAvailable || state.groupBy !== "person" ? state.groupBy : "none",
       knownCategories: knownCategories(),
-      selectedKeys: new Set(state.selectedSessions.keys()),
-      sessionMenu: state.sessionMenu,
-      expandedSessionKey: state.expandedSessionKey,
+      selectedKeys: new Set(selectedSessions.keys()),
       labelDisabledReason: (row) =>
         mutationDisabledReason({
           method: "sessions.patch",
@@ -1416,7 +1379,7 @@ export function createSessionsPage(
       onSearchChange: (query) => {
         deepLinkSessionKey = null;
         state.searchQuery = query;
-        resetPage();
+        state.page = 0;
         state.selectedSessions = new Map();
         clearSearchTimer();
         if (captureRequestScope()) {
@@ -1431,17 +1394,13 @@ export function createSessionsPage(
       onTranscriptSearch: () => void actions.runTranscriptSearch(),
       onClearTranscriptSearch: () => resetTranscriptSearchState(""),
       onSortChange: (column, direction) => {
-        setPresentation((draft) => {
-          draft.sortColumn = column;
-          draft.sortDir = direction;
-          draft.page = 0;
-        });
+        state.sortColumn = column;
+        state.sortDir = direction;
+        state.page = 0;
       },
       onGroupByChange: (mode) => {
-        setPresentation((draft) => {
-          draft.groupBy = mode;
-          draft.page = 0;
-        });
+        state.groupBy = mode;
+        state.page = 0;
         saveStoredGroupBy(mode);
       },
       onAssignCategory: assignCategory,
@@ -1454,15 +1413,11 @@ export function createSessionsPage(
         }
       },
       onPageChange: (page) => {
-        setPresentation((draft) => {
-          draft.page = page;
-        });
+        state.page = page;
       },
       onPageSizeChange: (pageSize) => {
-        setPresentation((draft) => {
-          draft.pageSize = pageSize;
-          draft.page = 0;
-        });
+        state.pageSize = pageSize;
+        state.page = 0;
       },
       onRefresh: () => void refreshSessionList(),
       onStatusFilterChange: (statusFilter) => updateStatusFilter(statusFilter),
@@ -1534,38 +1489,28 @@ export function createSessionsPage(
     openSessionMenu,
     archive: archiveActions.archive,
   };
-  const projection = projectSource(application, {
-    read: () => viewProps(),
-    subscribe: (_source, notify) => {
-      publish = notify;
-      return () => {
-        publish = () => {};
-      };
-    },
-    equality: "revision",
-  });
+
+  const presentationSources = [
+    application.agentIdentity,
+    application.navigation,
+    application.runtimeConfig,
+    application.plugins,
+  ].map((owner) => projectOwner(owner, (source) => source));
+  const revision = () =>
+    presentationSources.reduce((sum, source) => sum + source.revision(), observation.revision());
   onSettled(() => {
-    const stops = [
-      application.agentIdentity.subscribe(() => publish()),
-      application.navigation.subscribe(() => publish()),
-      application.runtimeConfig.subscribe(() => publish()),
-      application.plugins.subscribe(() => publish()),
-      observeAgentScope(application.agentSelection),
-    ];
+    const stopScope = observeAgentScope(application.agentSelection);
     applyRouteData();
     gatewayLifecycle.connect();
     return () => {
       active = false;
-      publish = () => {};
-      for (const stop of stops) {
-        stop();
-      }
+      observation.dispose();
+      stopScope();
       unsubscribeList?.();
       pluginActionLifetime.abort();
       transcriptSearchAbort?.abort();
       clearSearchTimer();
       inputDialog.abort();
-      details.reset();
       sessionPullRequestsForGateway(application.gateway).unwatch(menuOwner);
       gatewayLifecycle.dispose();
     };
@@ -1573,22 +1518,14 @@ export function createSessionsPage(
   return {
     actions,
     setRouteData,
-    revision: projection.revision,
+    revision,
     menu: () => {
-      projection.revision();
+      revision();
       return sessionMenuProps();
     },
     view: (): SessionsProps => {
-      const view = projection.read();
-      return {
-        ...view,
-        ...presentation,
-        // Keep the stored Person preference while the owner roster is unavailable.
-        groupBy:
-          view.personGroupingAvailable || presentation.groupBy !== "person"
-            ? presentation.groupBy
-            : "none",
-      };
+      revision();
+      return viewProps();
     },
   };
 }
