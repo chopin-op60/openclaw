@@ -216,7 +216,7 @@ class Proof:
         require(rc == 0 and match is not None, "Node release version unavailable")
         node_version = tuple(int(part) for part in match.groups())
         require(
-            (node_version[0] == 24 and node_version >= (24, 16, 0)) or node_version >= (26, 1, 0),
+            (node_version[0] == 24 and node_version >= (24, 22, 1)) or node_version >= (26, 12, 1),
             "install a Node release supported by the current product (26 recommended)",
         )
         rc, version, _ = self.run("pnpm-version", ["pnpm", "--version"])

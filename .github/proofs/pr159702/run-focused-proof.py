@@ -35,7 +35,7 @@ rows = []
 try:
     for index, file in enumerate(files):
         command = ["pnpm", "test", file, "--maxWorkers=1"]
-        if args.mode == "baseline":
+        if file == worker:
             command += ["-t", "publishes external skill and diagnostic edits without a periodic scan"]
         started = time.monotonic()
         result = subprocess.run(command, capture_output=True, text=True, env=env)
@@ -43,7 +43,7 @@ try:
         name = Path(file).name
         (args.evidence_dir / (name + ".log")).write_text(output)
         row = {"mode": args.mode, "head": actual, "file": file, "exitCode": result.returncode,
-               "wallSeconds": round(time.monotonic() - started, 3)}
+               "wallSeconds": round(time.monotonic() - started, 3), "command": command}
         if args.mode == "baseline":
             row["expectedRed"] = (result.returncode != 0 and "AssertionError" in output
                 and "expected undefined" in output and "description is required" in output)

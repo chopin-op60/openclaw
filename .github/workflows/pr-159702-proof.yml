@@ -1,85 +1,64 @@
-name: PR 159702 bounded failure attribution
+name: PR 159702 status integration proof
 on:
   push:
     branches: ["codex/proof-159702-20261020"]
 permissions:
   contents: read
 jobs:
-  qualify:
+  behavior:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
-          - mode: node-main
-            target: dcaf3d92fcd208737f447fbc1eb3093182cc2c9b
-          - mode: bun-main
-            target: 24afcdfebe8ea39e89ceb6b48e6a531fa48df8dd
-          - mode: bun-merge
-            target: 05ad3b946e88a43e362c041926631058d4a77d4d
-          - mode: live-after
-            target: 9173502aa874ab54661a0ea7da4d92557c474777
+          - mode: baseline
+            target: e04673af077726403964526a3af9a97b6fbbef22
+          - mode: after
+            target: dab73b82fb28e4b530c01a2a8ae1fea31207b611
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: Pin actual source and already-reviewed live proof
+      - name: Pin proof and source
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          mkdir -p "$RUNNER_TEMP/pr159702-proof" "$RUNNER_TEMP/pr159702-attribution"
+          mkdir -p "$RUNNER_TEMP/pr159702-proof" "$RUNNER_TEMP/pr159702-focused"
           cp .github/proofs/pr159702/prove-worker-inventory.py "$RUNNER_TEMP/pr159702-proof/"
-          git fetch --depth=1 --no-tags https://github.com/openclaw/openclaw.git "$TARGET"
+          cp .github/proofs/pr159702/run-focused-proof.py "$RUNNER_TEMP/pr159702-proof/"
+          cp .github/proofs/pr159702/regression.diff "$RUNNER_TEMP/pr159702-proof/"
+          git fetch --depth=1 --no-tags origin "$TARGET"
           git checkout --detach "$TARGET"
-          test "$(git rev-parse HEAD)" = "$TARGET"
+          git rev-parse HEAD
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           package-manager-cache: false
-      - name: Install target-pinned dependencies without secrets
+      - id: install
+        name: Install target-pinned pnpm and source dependencies without secrets
         run: |
           pnpm_version=$(python3 -c 'import json;print(json.load(open("package.json"))["packageManager"].split("@")[1].split("+")[0])')
           npm install --global "pnpm@$pnpm_version"
           pnpm install --frozen-lockfile
-      - name: Install source-pinned Bun
-        if: startsWith(matrix.mode, 'bun-')
-        uses: ./.github/actions/setup-test-bun
-      - name: Matched focused failure attribution
-        if: matrix.mode != 'live-after'
+      - name: Focused native-watch and consumer proof
         env:
           PROOF_MODE: ${{ matrix.mode }}
           TARGET: ${{ matrix.target }}
-        run: |
-          python3 - <<'PYCODE'
-          import json,os,pathlib,subprocess,time
-          mode=os.environ["PROOF_MODE"]
-          file=("src/skills/runtime/session-snapshot-content.test.ts" if mode.startswith("bun-") else "src/skills/runtime/discovery.integration.test.ts")
-          allowed=("PATH","HOME","LANG","LC_ALL","TMPDIR","TMP","TEMP","CI","GITHUB_ACTIONS","RUNNER_OS","RUNNER_TEMP","GITHUB_WORKSPACE")
-          env={k:os.environ[k] for k in allowed if k in os.environ}
-          env.update(CI="true",GIT_CONFIG_GLOBAL="/dev/null",GIT_CONFIG_NOSYSTEM="1",GIT_TERMINAL_PROMPT="0")
-          if mode.startswith("bun-"): env["OPENCLAW_VITEST_RUNTIME"]="bun"
-          out=pathlib.Path(os.environ["RUNNER_TEMP"])/"pr159702-attribution"
-          start=time.monotonic()
-          with (out/"test.log").open("w") as log:
-              result=subprocess.run(["pnpm","test",file,"--maxWorkers=1"],env=env,stdout=log,stderr=subprocess.STDOUT)
-          row=dict(mode=mode,head=os.environ["TARGET"],file=file,exitCode=result.returncode,wallSeconds=round(time.monotonic()-start,3))
-          (out/"result.json").write_text(json.dumps(row,indent=2)+"\n")
-          print(json.dumps(row),flush=True)
-          raise SystemExit(result.returncode)
-          PYCODE
-      - name: Complete current-head real Gateway and CLI proof
-        if: matrix.mode == 'live-after'
+        run: python3 "$RUNNER_TEMP/pr159702-proof/run-focused-proof.py" "$PROOF_MODE" --expect-sha "$TARGET" --proof-dir "$RUNNER_TEMP/pr159702-proof" --evidence-dir "$RUNNER_TEMP/pr159702-focused"
+      - name: Real Gateway and CLI native-watch proof
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         env:
+          PROOF_MODE: ${{ matrix.mode }}
           TARGET: ${{ matrix.target }}
-        run: python3 "$RUNNER_TEMP/pr159702-proof/prove-worker-inventory.py" after --expect-sha "$TARGET" --sandbox-parent "$RUNNER_TEMP"
-      - name: Upload synthetic evidence including original failures
+        run: python3 "$RUNNER_TEMP/pr159702-proof/prove-worker-inventory.py" "$PROOF_MODE" --expect-sha "$TARGET" --sandbox-parent "$RUNNER_TEMP"
+      - name: Upload sanitized synthetic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: skill-attribution-${{ matrix.mode }}-${{ matrix.target }}
+          name: native-skill-inventory-${{ matrix.mode }}-${{ matrix.target }}
           path: |
-            ${{ runner.temp }}/pr159702-attribution/
+            ${{ runner.temp }}/pr159702-focused/
             ${{ runner.temp }}/openclaw-worker-inventory-*/evidence/
           retention-days: 14
