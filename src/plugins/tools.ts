@@ -1,5 +1,5 @@
 /** Builds agent tools registered by plugins, preserving plugin scope around callbacks and descriptors. */
-import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { isRecord, isStringArray } from "@openclaw/normalization-core/record-coerce";
 import { compileGlobPatterns, matchesAnyGlobPattern } from "../agents/glob-pattern.js";
 import { normalizeToolPolicyName } from "../agents/tool-policy.js";
 import type { AnyAgentTool } from "../agents/tools/common.js";
@@ -194,10 +194,7 @@ function resolvePluginToolLoadState(params: {
 export function ensureStandalonePluginToolRegistryLoaded(params: {
   context: OpenClawPluginToolContext;
   toolAllowlist?: string[];
-  toolDenylist?: string[];
   allowGatewaySubagentBinding?: boolean;
-  hasAuthForProvider?: (providerId: string) => boolean;
-  env?: NodeJS.ProcessEnv;
 }): PluginRegistry | undefined {
   const loadState = resolvePluginToolLoadState(params);
   if (!loadState) {
@@ -623,9 +620,7 @@ function* resolvePluginToolsFromRegistry(
             inspected = { error: "tool must be an object" };
           } else {
             const requiredClientCaps = toolRaw.requiredClientCaps;
-            const validCaps =
-              Array.isArray(requiredClientCaps) &&
-              requiredClientCaps.every((requiredCap) => typeof requiredCap === "string");
+            const validCaps = isStringArray(requiredClientCaps);
             if (
               validCaps &&
               requiredClientCaps.some((requiredCap) => !clientCaps.has(requiredCap))

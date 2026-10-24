@@ -12137,7 +12137,7 @@ printf '%s\\n' "$DEEPSEEK_API_KEY" "$DEEPINFRA_API_KEY"`,
     const stable = workflowJob(RELEASE_CHECKS_WORKFLOW, "windows_node_stable_e2e");
     const main = workflowJob(RELEASE_CHECKS_WORKFLOW, "windows_node_main_e2e");
     const reusableWorkflow =
-      "openclaw/openclaw-windows-node/.github/workflows/release-candidate-e2e.yml@ceadc375b858b07577d55029d3b5c85b9dc3389e";
+      "openclaw/openclaw-windows-node/.github/workflows/release-candidate-e2e.yml@fb45902950fd4f62d20a37dbbafac27e916917f2";
 
     expect(resolver.outputs).toMatchObject({
       stable_asset_name: "${{ steps.resolve.outputs.stable_asset_name }}",
@@ -12156,8 +12156,10 @@ printf '%s\\n' "$DEEPSEEK_API_KEY" "$DEEPINFRA_API_KEY"`,
     );
     expect(prerelease.uses).toBe(reusableWorkflow);
     expect(prerelease.with).toMatchObject({
-      candidate_artifact_name: "${{ needs.prepare_release_package.outputs.artifact_name }}",
-      candidate_artifact_run_id: "${{ needs.prepare_release_package.outputs.artifact_run_id }}",
+      candidate_artifact_name:
+        "${{ needs.prepare_release_package.outputs.windows_node_artifact_name }}",
+      candidate_artifact_run_id: "${{ github.run_id }}",
+      candidate_sha256: "${{ needs.prepare_release_package.outputs.windows_node_package_sha256 }}",
       windows_node_release_asset_name:
         "${{ needs.resolve_windows_node_release_artifacts.outputs.prerelease_asset_name }}",
       windows_node_release_asset_sha256:
@@ -12165,13 +12167,15 @@ printf '%s\\n' "$DEEPSEEK_API_KEY" "$DEEPINFRA_API_KEY"`,
       windows_node_source: "release",
       windows_node_source_sha:
         "${{ needs.resolve_windows_node_release_artifacts.outputs.prerelease_release_sha }}",
-      windows_node_workflow_sha: "ceadc375b858b07577d55029d3b5c85b9dc3389e",
+      windows_node_workflow_sha: "fb45902950fd4f62d20a37dbbafac27e916917f2",
     });
     expect(stable.uses).toBe(reusableWorkflow);
     expect(stable.with).toMatchObject({
       allow_protocol_mismatch: false,
-      candidate_artifact_name: "${{ needs.prepare_release_package.outputs.artifact_name }}",
-      candidate_artifact_run_id: "${{ needs.prepare_release_package.outputs.artifact_run_id }}",
+      candidate_artifact_name:
+        "${{ needs.prepare_release_package.outputs.windows_node_artifact_name }}",
+      candidate_artifact_run_id: "${{ github.run_id }}",
+      candidate_sha256: "${{ needs.prepare_release_package.outputs.windows_node_package_sha256 }}",
       windows_node_release_asset_name:
         "${{ needs.resolve_windows_node_release_artifacts.outputs.stable_asset_name }}",
       windows_node_release_asset_sha256:
@@ -12179,7 +12183,7 @@ printf '%s\\n' "$DEEPSEEK_API_KEY" "$DEEPINFRA_API_KEY"`,
       windows_node_source: "release",
       windows_node_source_sha:
         "${{ needs.resolve_windows_node_release_artifacts.outputs.stable_release_sha }}",
-      windows_node_workflow_sha: "ceadc375b858b07577d55029d3b5c85b9dc3389e",
+      windows_node_workflow_sha: "fb45902950fd4f62d20a37dbbafac27e916917f2",
     });
     expect(main.uses).toBe(reusableWorkflow);
     expect(main.needs).toEqual([
@@ -12188,12 +12192,14 @@ printf '%s\\n' "$DEEPSEEK_API_KEY" "$DEEPINFRA_API_KEY"`,
       "resolve_windows_node_main_source",
     ]);
     expect(main.with).toMatchObject({
-      candidate_artifact_name: "${{ needs.prepare_release_package.outputs.artifact_name }}",
-      candidate_artifact_run_id: "${{ needs.prepare_release_package.outputs.artifact_run_id }}",
+      candidate_artifact_name:
+        "${{ needs.prepare_release_package.outputs.windows_node_artifact_name }}",
+      candidate_artifact_run_id: "${{ github.run_id }}",
+      candidate_sha256: "${{ needs.prepare_release_package.outputs.windows_node_package_sha256 }}",
       windows_node_source: "main",
       windows_node_source_sha:
         "${{ needs.resolve_windows_node_main_source.outputs.main_source_sha }}",
-      windows_node_workflow_sha: "ceadc375b858b07577d55029d3b5c85b9dc3389e",
+      windows_node_workflow_sha: "fb45902950fd4f62d20a37dbbafac27e916917f2",
       allow_protocol_mismatch: false,
     });
   });

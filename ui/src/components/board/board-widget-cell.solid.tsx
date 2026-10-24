@@ -10,7 +10,7 @@ import {
   Switch,
   Match,
 } from "solid-js";
-import { ensureCustomElementDefined } from "../../app/lazy-custom-element.ts";
+import { registerBoardDocumentEnglish } from "../../i18n/locales/en-board-document.ts";
 import { registerBoardEnglish } from "../../i18n/locales/en-board.ts";
 import {
   BOARD_DOCUMENT_AUTO_MAX_ROWS,
@@ -47,9 +47,10 @@ import { createBoardWidgetFrame, BoardWidgetFrame } from "./board-widget-frame.t
 import { BoardWidgetMenu } from "./board-widget-menu.tsx";
 import { CoreBoardWidget } from "./core-board-widget.tsx";
 
+registerEnglishCatalog(registerBoardDocumentEnglish);
+
 registerEnglishCatalog(registerBoardEnglish);
 
-const loadMcpAppView = () => import("../mcp-app-view.tsx");
 const cells = new WeakMap<HTMLElement, BoardWidgetCellHandle>();
 
 export function boardWidgetPresentationReady(host: HTMLElement): boolean {
@@ -230,10 +231,10 @@ function BoardWidgetCellContent(
     focusWidget: () => widgetRoot()?.focus(),
     selectMenuItem,
     async teardown() {
-      await mcpElement?.teardown?.();
+      await mcpElement?.teardown();
     },
     restartAfterTeardown() {
-      mcpElement?.restartAfterTeardown?.();
+      mcpElement?.restartAfterTeardown();
     },
   });
   createEffect(
@@ -245,9 +246,6 @@ function BoardWidgetCellContent(
         frame.widgetChanged(previousWidget, widget);
       }
       frame.activityChanged();
-      if (widget?.contentKind === "mcp-app") {
-        void ensureCustomElementDefined("mcp-app-view", loadMcpAppView).catch(() => undefined);
-      }
     },
   );
   createEffect(
@@ -279,6 +277,16 @@ function BoardWidgetCellContent(
     frame.disconnect();
   });
   const unavailable = () => props.busy || actionPending() || !canMutate();
+  const RemoveButton = () => (
+    <button
+      class="btn btn--small"
+      type="button"
+      disabled={unavailable()}
+      onClick={() => runAction(() => props.callbacks!.remove(props.widget!))}
+    >
+      {t("board.widget.remove")}
+    </button>
+  );
   const AccessNotice = () => (
     <Show
       when={props.widget?.grantState === "pending"}
@@ -290,14 +298,7 @@ function BoardWidgetCellContent(
           >
             <strong>{t("board.widget.rejected")}</strong>
             <span>{t("board.widget.rejectedDetail")}</span>
-            <button
-              class="btn btn--small"
-              type="button"
-              disabled={unavailable()}
-              onClick={() => runAction(() => props.callbacks!.remove(props.widget!))}
-            >
-              {t("board.widget.remove")}
-            </button>
+            <RemoveButton />
           </div>
         </Show>
       }
@@ -371,14 +372,7 @@ function BoardWidgetCellContent(
             >
               <CustomPluginUiDisabled context={context} pluginId={pluginId()} />
             </Show>
-            <button
-              class="btn btn--small"
-              type="button"
-              disabled={unavailable()}
-              onClick={() => runAction(() => props.callbacks!.remove(props.widget!))}
-            >
-              {t("board.widget.remove")}
-            </button>
+            <RemoveButton />
           </div>
         }
       >
@@ -581,7 +575,7 @@ function BoardWidgetCellContent(
               {props.widget!.contentKind === "mcp-app"
                 ? t("board.widget.kindMcp")
                 : props.widget!.contentKind === "plugin"
-                  ? props.widget!.kindLabel || contribution()?.label || t("board.widget.kindPlugin")
+                  ? contribution()?.label || t("board.widget.kindPlugin")
                   : t("board.widget.kindHtml")}
             </span>
             <BoardGrantedCapabilities widget={props.widget!} />

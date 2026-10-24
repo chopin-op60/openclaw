@@ -458,10 +458,13 @@ it("invalidates an evicted workspace before accepting its next snapshot", async 
   expect(await descriptions(input)).toEqual(["Changed while evicted"]);
 });
 
-it("discovers new agent-plugin children during the passive worker pass", async () => {
+it("discovers agent-plugin additions and rejected files during the passive worker pass", async () => {
   const pluginRoot = path.join(workspace, "plugin");
   const skillRoot = path.join(pluginRoot, "skills");
   await write("First", skillRoot, "first");
+  const brokenFile = path.join(skillRoot, "broken", "SKILL.md");
+  await fs.mkdir(path.dirname(brokenFile), { recursive: true });
+  await fs.writeFile(brokenFile, "---\nname: broken\n---\n", "utf8");
   const input = request();
   const prepared = await prepareSkillSourcePlan(workspace, {
     config: { plugins: { enabled: false } },
@@ -483,8 +486,21 @@ it("discovers new agent-plugin children during the passive worker pass", async (
       ],
     },
   };
-  const names = async () =>
-    (await prepareLocalSkillSources(input, { plan })).entries.map((entry) => entry.skill.name);
+  const names = async () => {
+    const sources = await prepareLocalSkillSources(input, { plan });
+    expect(sources.diagnostics).toEqual({
+      items: [
+        { kind: "invalid", path: brokenFile, message: "description is required" },
+        {
+          kind: "invalid",
+          path: path.join(workspace, "plugin-links", "broken", "SKILL.md"),
+          message: "description is required",
+        },
+      ],
+      omitted: 0,
+    });
+    return sources.entries.map((entry) => entry.skill.name);
+  };
   expect(await names()).toContain("first");
   expect(await names()).not.toContain("second");
   await write("Second", skillRoot, "second");
