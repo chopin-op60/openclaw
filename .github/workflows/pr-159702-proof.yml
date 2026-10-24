@@ -1,4 +1,4 @@
-name: PR 159702 status integration proof
+name: PR 159702 generated plugin diagnostics proof
 on:
   push:
     branches: ["codex/proof-159702-20261020"]
@@ -13,9 +13,9 @@ jobs:
       matrix:
         include:
           - mode: baseline
-            target: e04673af077726403964526a3af9a97b6fbbef22
+            target: 2924588f01c15b49438c08468a47ced09d2341e4
           - mode: after
-            target: dab73b82fb28e4b530c01a2a8ae1fea31207b611
+            target: d1ecfd058e72f9b3b13577a6fd85b95ac6c7552b
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -48,7 +48,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: python3 "$RUNNER_TEMP/pr159702-proof/run-focused-proof.py" "$PROOF_MODE" --expect-sha "$TARGET" --proof-dir "$RUNNER_TEMP/pr159702-proof" --evidence-dir "$RUNNER_TEMP/pr159702-focused"
       - name: Real Gateway and CLI native-watch proof
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.mode == 'after' }}
         env:
           PROOF_MODE: ${{ matrix.mode }}
           TARGET: ${{ matrix.target }}

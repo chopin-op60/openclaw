@@ -26,7 +26,7 @@ files = [worker] if args.mode == "baseline" else [
     "src/cli/skills-cli.test.ts",
 ]
 if args.mode == "baseline":
-    subprocess.run(["git", "apply", str(args.proof_dir / "regression.diff")], check=True)
+    subprocess.run(["git", "apply", "--unidiff-zero", str(args.proof_dir / "regression.diff")], check=True)
 # Retain runner/tool locations, not service or operator credentials.
 allowed = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TMP", "TEMP", "CI", "GITHUB_ACTIONS", "RUNNER_OS", "RUNNER_TEMP", "GITHUB_WORKSPACE")
 env = {key: os.environ[key] for key in allowed if key in os.environ}
@@ -36,7 +36,7 @@ try:
     for index, file in enumerate(files):
         command = ["pnpm", "test", file, "--maxWorkers=1"]
         if file == worker:
-            command += ["-t", "publishes external skill and diagnostic edits without a periodic scan"]
+            command += ["-t", "publishes external skill and diagnostic edits without a periodic scan|discovers agent-plugin additions and rejected files during the passive worker pass"]
         started = time.monotonic()
         result = subprocess.run(command, capture_output=True, text=True, env=env)
         output = result.stdout + result.stderr
