@@ -1,64 +1,61 @@
-name: PR 159702 discovery diagnostics and terminal output proof
+name: PR 159702 worker fingerprint contract proof
 on:
   push:
     branches: ["codex/proof-159702-20261020"]
 permissions:
   contents: read
 jobs:
-  behavior:
+  worker-contract:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - mode: baseline
-            target: 054c4ba7f663e78b95972d8e557fd1c102a5aa69
-          - mode: after
-            target: 11073d11e15a0c264384ab85fa1d5b5a9464a36b
+    timeout-minutes: 20
+    env:
+      TARGET: d1ae5093de65e3e0e615139f08686db0891790e1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: Pin proof and source
-        env:
-          TARGET: ${{ matrix.target }}
+      - name: Pin actual test-only correction
         run: |
-          mkdir -p "$RUNNER_TEMP/pr159702-proof" "$RUNNER_TEMP/pr159702-focused"
-          cp .github/proofs/pr159702/prove-worker-inventory.py "$RUNNER_TEMP/pr159702-proof/"
-          cp .github/proofs/pr159702/run-focused-proof.py "$RUNNER_TEMP/pr159702-proof/"
-          cp .github/proofs/pr159702/regression.diff "$RUNNER_TEMP/pr159702-proof/"
           git fetch --depth=1 --no-tags origin "$TARGET"
           git checkout --detach "$TARGET"
-          git rev-parse HEAD
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: "24.22.1"
           package-manager-cache: false
-      - id: install
-        name: Install target-pinned pnpm and source dependencies without secrets
+      - name: Install source-pinned dependencies without secrets
         run: |
           pnpm_version=$(python3 -c 'import json;print(json.load(open("package.json"))["packageManager"].split("@")[1].split("+")[0])')
           npm install --global "pnpm@$pnpm_version"
           pnpm install --frozen-lockfile
-      - name: Focused native-watch and consumer proof
-        env:
-          PROOF_MODE: ${{ matrix.mode }}
-          TARGET: ${{ matrix.target }}
-        run: python3 "$RUNNER_TEMP/pr159702-proof/run-focused-proof.py" "$PROOF_MODE" --expect-sha "$TARGET" --proof-dir "$RUNNER_TEMP/pr159702-proof" --evidence-dir "$RUNNER_TEMP/pr159702-focused"
-      - name: Real Gateway and CLI native-watch proof
-        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.mode == 'after' }}
-        env:
-          PROOF_MODE: ${{ matrix.mode }}
-          TARGET: ${{ matrix.target }}
-        run: python3 "$RUNNER_TEMP/pr159702-proof/prove-worker-inventory.py" "$PROOF_MODE" --expect-sha "$TARGET" --sandbox-parent "$RUNNER_TEMP"
-      - name: Upload sanitized synthetic evidence
+      - name: Entire affected worker contract file
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, time
+          from pathlib import Path
+          actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          assert actual == os.environ["TARGET"]
+          subprocess.run(["git", "diff", "--exit-code"], check=True)
+          allowed = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TMP", "TEMP", "CI", "GITHUB_ACTIONS", "RUNNER_OS", "RUNNER_TEMP", "GITHUB_WORKSPACE")
+          env = {key: os.environ[key] for key in allowed if key in os.environ}
+          env.update(CI="true", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
+          directory = Path(os.environ["RUNNER_TEMP"]) / "pr159702-worker"
+          directory.mkdir()
+          command = ["pnpm", "test", "src/skills/runtime/discovery.worker.test.ts", "--maxWorkers=1"]
+          started = time.monotonic()
+          result = subprocess.run(command, capture_output=True, text=True, env=env)
+          output = result.stdout + result.stderr
+          (directory / "worker-test.log").write_text(output)
+          facts = {"head": actual, "command": command, "exitCode": result.returncode, "wallSeconds": round(time.monotonic() - started, 3)}
+          (directory / "result.json").write_text(json.dumps(facts, indent=2) + "\n")
+          print(json.dumps(facts), flush=True)
+          print(output, flush=True)
+          raise SystemExit(result.returncode)
+          PY
+      - name: Upload isolated worker result
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: native-skill-inventory-${{ matrix.mode }}-${{ matrix.target }}
-          path: |
-            ${{ runner.temp }}/pr159702-focused/
-            ${{ runner.temp }}/openclaw-worker-inventory-*/evidence/
+          name: worker-fingerprint-${{ env.TARGET }}
+          path: ${{ runner.temp }}/pr159702-worker/
           retention-days: 14
