@@ -1,4 +1,4 @@
-name: PR 159702 generated plugin diagnostics proof
+name: PR 159702 discovery diagnostics and terminal output proof
 on:
   push:
     branches: ["codex/proof-159702-20261020"]
@@ -13,9 +13,9 @@ jobs:
       matrix:
         include:
           - mode: baseline
-            target: 2924588f01c15b49438c08468a47ced09d2341e4
+            target: 054c4ba7f663e78b95972d8e557fd1c102a5aa69
           - mode: after
-            target: d1ecfd058e72f9b3b13577a6fd85b95ac6c7552b
+            target: 11073d11e15a0c264384ab85fa1d5b5a9464a36b
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

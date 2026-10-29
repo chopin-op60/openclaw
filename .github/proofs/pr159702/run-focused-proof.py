@@ -19,7 +19,8 @@ actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(
 assert actual == args.expect_sha
 args.evidence_dir.mkdir(parents=True, exist_ok=True)
 worker = "src/skills/runtime/discovery.integration.test.ts"
-files = [worker] if args.mode == "baseline" else [
+status = "src/skills/discovery/status-workspace.test.ts"
+files = [worker, status] if args.mode == "baseline" else [
     worker,
     "src/skills/discovery/status-workspace.test.ts",
     "src/skills/loading/workspace-skill-remote.test.ts",
@@ -37,6 +38,8 @@ try:
         command = ["pnpm", "test", file, "--maxWorkers=1"]
         if file == worker:
             command += ["-t", "publishes external skill and diagnostic edits without a periodic scan|discovers agent-plugin additions and rejected files during the passive worker pass"]
+        elif args.mode == "baseline" and file == status:
+            command += ["-t", "reports rejected skills through cached inventory and CLI output until they are repaired"]
         started = time.monotonic()
         result = subprocess.run(command, capture_output=True, text=True, env=env)
         output = result.stdout + result.stderr
@@ -45,16 +48,22 @@ try:
         row = {"mode": args.mode, "head": actual, "file": file, "exitCode": result.returncode,
                "wallSeconds": round(time.monotonic() - started, 3), "command": command}
         if args.mode == "baseline":
-            row["expectedRed"] = (result.returncode != 0 and "AssertionError" in output
-                and "expected undefined" in output and "description is required" in output)
+            if file == worker:
+                row["expectedRed"] = (result.returncode != 0 and "AssertionError" in output
+                    and "expected undefined" in output and "description is required" in output)
+            else:
+                row["expectedRed"] = (result.returncode != 0 and "AssertionError" in output
+                    and "diagnostics" in output
+                    and "Skill path resolves outside its configured root." in output
+                    and "invalid frontmatter: MISSING_CHAR" in output)
         rows.append(row)
         (args.evidence_dir / "focused-results.json").write_text(json.dumps(rows, indent=2) + "\n")
         print(json.dumps(row), flush=True)
         print(output, flush=True)
 finally:
     if args.mode == "baseline":
-        subprocess.run(["git", "restore", "--source=HEAD", "--staged", "--worktree", worker], check=True)
+        subprocess.run(["git", "restore", "--source=HEAD", "--staged", "--worktree", worker, status], check=True)
 if args.mode == "baseline":
-    assert rows[0]["expectedRed"], "baseline must fail on missing diagnostics, not fixture setup"
+    assert len(rows) == 2 and all(row["expectedRed"] for row in rows), "both baseline files must fail on missing diagnostics, not fixture setup"
 else:
     assert all(row["exitCode"] == 0 for row in rows), "one or more focused owner files failed"
