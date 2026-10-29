@@ -1,9 +1,16 @@
-import { randomUUID } from "node:crypto";
-import { asNonNegativeFiniteNumber } from "@openclaw/normalization-core/number-coercion";
+import {
+  asNonNegativeFiniteNumber,
+  parseStrictFiniteNumber,
+  parseStrictNonNegativeInteger,
+} from "@openclaw/normalization-core/number-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { validateSessionId } from "../../../config/sessions/paths.js";
-import { isMainRestartRecoveryCandidate } from "../../../config/sessions/restart-recovery-state.js";
+import { admitCanonicalSessionEntry } from "../../../config/sessions/session-entry-json.js";
+import {
+  SESSION_ENTRY_NUMERIC_FIELDS,
+  type SessionEntryNumericSnapshot,
+} from "../../../config/sessions/session-entry-numeric-snapshot.js";
 import {
   hasLegacySessionProviderState,
   LEGACY_SESSION_ENTRY_STATE_FIELDS,
@@ -15,114 +22,42 @@ import {
   normalizeMemoryFlush,
   normalizeOptionalTimestamp,
   normalizePendingFinalDelivery,
-  projectCanonicalSessionEntryShape,
 } from "../../../config/sessions/store-entry-shape.js";
 import type { SessionEntry } from "../../../config/sessions/types.js";
-import { isIncognitoSessionKey, parseAgentSessionKey } from "../../../routing/session-key.js";
+import { parseAgentSessionKey } from "../../../routing/session-key.js";
 
-/** Doctor retires legacy activity while preserving the previous writer's completed yield. */
+export type SessionEntryStateRepair = {
+  entry: Record<string, unknown>;
+  numericChanges?: SessionEntryNumericSnapshot;
+};
+
+/** Retire file-era activity metadata without reconstructing an execution. */
 export function migrateLegacySessionRunOutcome(
   value: Record<string, unknown>,
-  sessionKey?: string,
   updatedAt: unknown = value.updatedAt,
 ): Record<string, unknown> {
   if (value.status !== "running" && value.status !== "queued") {
     return value;
   }
-  const runId = normalizeOptionalString(value.lifecycleRunId);
-  const terminalRuns = value.restartRecoveryTerminalRunIds;
-  const delivered = value.restartRecoveryTerminalDeliveryEvidence;
-  const hasNoTerminalEvidence =
-    delivered === undefined ||
-    (Array.isArray(delivered) &&
-      delivered.every(
-        (evidence) =>
-          isRecord(evidence) && evidence.runId !== runId && evidence.transcriptRunId !== runId,
-      ));
-  const eligible = Boolean(
-    sessionKey &&
-    value.archivedAt === undefined &&
-    value.incognito !== true &&
-    !isIncognitoSessionKey(sessionKey) &&
-    isMainRestartRecoveryCandidate(value, sessionKey),
-  );
-  const startedAt = asNonNegativeFiniteNumber(value.startedAt);
-  const endedAt = asNonNegativeFiniteNumber(value.endedAt);
-  // Starts clear timing. An admitted recovery retains its own fence until its yielded end.
-  const yielded =
-    eligible &&
-    value.status === "running" &&
-    value.abortedLastRun === false &&
-    runId &&
-    value.lifecycleRunId === runId &&
-    (value.activeWriterRunId === undefined || value.activeWriterRunId === runId) &&
-    startedAt !== undefined &&
-    endedAt !== undefined &&
-    endedAt >= startedAt &&
-    value.runtimeMs === endedAt - startedAt &&
-    value.lastRunError === undefined &&
-    !(Array.isArray(terminalRuns) && terminalRuns.includes(runId)) &&
-    hasNoTerminalEvidence &&
-    (value.restartRecoveryRuns === undefined ||
-      (Array.isArray(value.restartRecoveryRuns) &&
-        value.restartRecoveryRuns.every(
-          (run) => isRecord(run) && typeof run.runId === "string" && run.runId !== runId,
-        )));
-  const next: Record<string, unknown> = {
+  return {
     ...value,
-    status: yielded ? undefined : "interrupted",
-    abortedLastRun: !yielded,
-    endedAt: endedAt ?? asNonNegativeFiniteNumber(updatedAt) ?? 0,
-    lastRunError: yielded
-      ? undefined
-      : (normalizeOptionalString(value.lastRunError) ??
-        "Run interrupted by a Gateway restart or loss."),
+    status: "killed",
+    abortedLastRun: true,
+    endedAt: asNonNegativeFiniteNumber(value.endedAt) ?? asNonNegativeFiniteNumber(updatedAt) ?? 0,
+    activeWriterRunId: undefined,
+    lifecycleRunId: undefined,
+    lastRunError: undefined,
+    suppressErrorNotice: true,
   };
-  if (
-    value.abortedLastRun === true &&
-    runId &&
-    value.lifecycleRunId === runId &&
-    value.activeWriterRunId === runId &&
-    isRecord(value.delivery) &&
-    value.delivery.kind === "internal" &&
-    !value.mainRestartRecovery &&
-    !value.restartRecoveryDeliveryRunId &&
-    !value.restartRecoveryDeliverySourceRunId &&
-    !value.pendingFinalDelivery &&
-    Array.isArray(terminalRuns) &&
-    terminalRuns.includes(runId) &&
-    hasNoTerminalEvidence
-  ) {
-    // Older command cleanup retired this exact undelivered source before recording its restart.
-    next.restartRecoveryDeliveryRunId = runId;
-    next.restartRecoveryDeliverySourceRunId = runId;
-    const remaining = terminalRuns.filter((terminalRunId) => terminalRunId !== runId);
-    next.restartRecoveryTerminalRunIds = remaining.length ? remaining : undefined;
-  }
-  if (
-    value.status === "running" &&
-    eligible &&
-    !next.mainRestartRecovery &&
-    !next.restartRecoveryDeliveryRunId &&
-    !next.pendingFinalDelivery &&
-    (next.restartRecoveryRuns === undefined ||
-      (Array.isArray(next.restartRecoveryRuns) && next.restartRecoveryRuns.length === 0)) &&
-    !(runId && Array.isArray(terminalRuns) && terminalRuns.includes(runId)) &&
-    hasNoTerminalEvidence
-  ) {
-    // The previous writer used running as admission custody; transfer it before removing that signal.
-    next.mainRestartRecovery = { cycleId: randomUUID(), revision: 1, chargedAttempts: 0 };
-  }
-  return next;
 }
 
 /** Doctor preserves July routing and scalar-state contracts before removing their old keys. */
 export function migrateLegacySessionEntryState(
   value: Record<string, unknown>,
   updatedAt: unknown = value.updatedAt,
-  sessionKey?: string,
-): Record<string, unknown> {
+): SessionEntryStateRepair {
   const next = { ...value };
+  const numericChanges: SessionEntryNumericSnapshot = {};
   if (hasLegacySessionProviderState(value)) {
     for (const [legacy, current] of LEGACY_SESSION_PROVIDER_FIELDS) {
       if (typeof value[current] !== "string" && typeof value[legacy] === "string") {
@@ -179,7 +114,24 @@ export function migrateLegacySessionEntryState(
       next.memoryFlush = { kind: "succeeded", compactionCount };
     }
   }
-  return migrateLegacySessionRunOutcome(next, sessionKey, updatedAt);
+  for (const field of SESSION_ENTRY_NUMERIC_FIELDS) {
+    const candidate = next[field];
+    if (typeof candidate !== "string") {
+      continue;
+    }
+    const number =
+      field === "spawnDepth"
+        ? parseStrictNonNegativeInteger(candidate)
+        : parseStrictFiniteNumber(candidate);
+    if (number !== undefined) {
+      next[field] = number;
+      numericChanges[field] = number;
+    }
+  }
+  return {
+    entry: migrateLegacySessionRunOutcome(next, updatedAt),
+    numericChanges,
+  };
 }
 
 // Persisted stores may contain old or malformed ids; reject path-like ids before use.
@@ -212,8 +164,8 @@ export function normalizePersistedSessionEntryShape(
   }
 
   const modelSelectionLocked = value.modelSelectionLocked === true;
-  let next = projectCanonicalSessionEntryShape(
-    migrateLegacySessionEntryState(value, value.updatedAt, options.sessionKey),
+  let next = admitCanonicalSessionEntry(
+    migrateLegacySessionEntryState(value, value.updatedAt).entry,
   );
   if (value.sessionId !== undefined) {
     if (!isSafeSessionId(value.sessionId)) {

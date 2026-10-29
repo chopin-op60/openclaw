@@ -5,7 +5,6 @@ import {
 } from "@openclaw/normalization-core/string-coerce";
 import {
   ErrorCodes,
-  errorShape,
   validateSessionsAbortParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import { retireSessionMcpRuntime } from "../../agents/agent-bundle-mcp-manager-api.js";
@@ -14,7 +13,6 @@ import {
   resolveActiveEmbeddedRunOwnerByRunId,
   type ActiveEmbeddedRunOwner,
 } from "../../agents/embedded-agent-runner/runs.js";
-import { captureYieldedMainSessionContinuation } from "../../agents/main-session-recovery/main-session-restart-recovery-target.js";
 import { isConfiguredSessionStoreAgentId } from "../../config/sessions.js";
 import { composeSessionSourceAssertion } from "../../config/sessions/session-source-authority.js";
 import { resolveExistingAgentSessionStoreTargetsAsync } from "../../config/sessions/targets-runtime.js";
@@ -54,6 +52,7 @@ import { abortControlledSubagents, descendantAbortError } from "./chat-abort-des
 import { handleChatAbortRequestWithLifecycle } from "./chat-abort-handler.js";
 import { abortDormantSubagentSession } from "./chat-abort-runtime.js";
 import { abortedPartialPersistenceError } from "./chat-aborted-partial.js";
+import { respondError } from "./response.js";
 import { createSessionAbortPersistence } from "./session-abort-persistence.js";
 import { emitSessionsChanged } from "./session-change-event.js";
 import {
@@ -115,11 +114,7 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
       agentId: requestedParamAgentId,
     });
     if (requestedKey && requestedParamAgentId && !scopedRequestedKey) {
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, "session key agent does not match agentId"),
-      );
+      respondError(respond, ErrorCodes.INVALID_REQUEST, "session key agent does not match agentId");
       return;
     }
     const requestedKeyAgentId = scopedRequestedKey
@@ -271,11 +266,7 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
           );
         });
     if (!configuredTarget && existingTargets.length === 0 && !hasExactActiveRun) {
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, `agent "${targetAgentId}" not found`),
-      );
+      respondError(respond, ErrorCodes.INVALID_REQUEST, `agent "${targetAgentId}" not found`);
       return;
     }
     const admittedTarget = sessionMutationAuthorization?.admittedTarget;
@@ -286,11 +277,7 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
         admittedTarget.agentId !== targetAgentId ||
         sessionEntry?.sessionId !== admittedTarget.sessionId)
     ) {
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, "session target is unavailable"),
-      );
+      respondError(respond, ErrorCodes.INVALID_REQUEST, "session target is unavailable");
       return;
     }
     const requiredSessionId = narrow ? admittedTarget?.sessionId : undefined;
@@ -305,11 +292,7 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
           sessionEntry?.sessionId === embeddedRun.sessionId),
     );
     if (embeddedRun && !embeddedRunMatchesSession) {
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, "runId does not match session"),
-      );
+      respondError(respond, ErrorCodes.INVALID_REQUEST, "runId does not match session");
       return;
     }
     const resolvedAbortSessionKey = resolveAbortSessionKey({
@@ -434,7 +417,6 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
     let aborted = false;
     let chatAbortSucceeded = false;
     let failedResponse: Parameters<typeof respond> | undefined;
-    let descendantsCancelled = false;
     let responseMeta: Record<string, unknown> | undefined;
     let abortWarning: string | undefined;
     const capturedSessionEmbeddedRun = persistedSessionId
@@ -450,23 +432,6 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
         : undefined;
     const yieldedRunId =
       typeof sessionEntry?.lifecycleRunId === "string" ? sessionEntry.lifecycleRunId : undefined;
-    const yieldedParent =
-      !requestedRunId &&
-      yieldedRunId &&
-      !preAbortRuns.has(yieldedRunId) &&
-      loadedSession &&
-      sessionEntry &&
-      captureYieldedMainSessionContinuation({
-        entry: sessionEntry,
-        requester: { agentId: targetAgentId, sessionKey: canonicalKey },
-        purpose: "stop",
-      })
-        ? {
-            runId: yieldedRunId,
-            sessionId: sessionEntry.sessionId,
-            startedAtMs: sessionEntry.startedAt,
-          }
-        : undefined;
     const nativeYieldedCandidate =
       !requestedRunId &&
       yieldedRunId &&
@@ -505,10 +470,7 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
             reason: "session-stop",
           });
         }
-        if (descendantsCancelled && yieldedParent) {
-          // Child cancellation consumes the wake; join its parent's terminal write too.
-          await persistSessionAbort(yieldedParent);
-        } else if (nativeYieldedParent) {
+        if (nativeYieldedParent) {
           await persistSessionAbort(nativeYieldedParent, true);
         }
       } catch (error) {
@@ -610,9 +572,9 @@ export const sessionAbortHandlers: GatewayRequestHandlers = {
       ),
       {
         ...(!requestedRunId ? { cascadeDescendants: true as const } : {}),
+        yieldedRequesterRunId: nativeYieldedCandidate?.runId,
         hookContext: stopHookContext,
         onDescendantsCancelled: (result) => {
-          descendantsCancelled = true;
           if (
             nativeYieldedCandidate &&
             result.cancelledRequesters.some(

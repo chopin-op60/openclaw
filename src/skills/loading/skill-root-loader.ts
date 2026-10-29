@@ -171,7 +171,10 @@ export function loadSkillRootRecords(params: {
     source: params.source,
     limits,
     allowedSymlinkTargetRealPaths,
-    onDiagnostic: params.onDiagnostic,
+    onDiagnostic: (diagnostic) => {
+      params.diagnostics?.add(diagnostic);
+      params.onDiagnostic?.(diagnostic);
+    },
   });
   const maxSkillsLoadedPerSource = Math.max(0, limits.maxSkillsLoadedPerSource);
   const loadCandidate = (candidate: CandidateSkillDir) => {

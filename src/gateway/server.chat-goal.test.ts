@@ -48,6 +48,7 @@ import { registerGoalAutomaticContinuationCases } from "./server.chat-goal-conti
 import { registerGoalReplacementCases } from "./server.chat-goal-replacement.test-support.js";
 import { registerWorkerGoalChatCases } from "./server.chat-goal-workers.test-support.js";
 import {
+  goalAgentResult,
   createGoalChatStartRequest,
   expectGoalChatRetryResponses,
   installReplyDispatchHook,
@@ -55,6 +56,7 @@ import {
   registerGoalChatRestartSettlementCase,
   registerGoalChatOperationCollisionCases,
 } from "./server.chat-goal.test-support.js";
+import { gatewayConnect, gatewayProfile } from "./server/client-fixtures.test-support.js";
 import { seedDeletedSessionTranscript } from "./session-history-fixture.test-support.js";
 import {
   bindSessionRowProjection,
@@ -83,13 +85,7 @@ const sessionKey = "agent:main:main";
 const sessionId = "goal-chat-session";
 const client: GatewayClient = {
   connId: "goal-chat-ui",
-  connect: {
-    minProtocol: 1,
-    maxProtocol: 1,
-    role: "operator",
-    scopes: ["operator.read", "operator.write", "operator.admin"],
-    client: { id: "openclaw-control-ui", version: "test", platform: "test", mode: "webchat" },
-  },
+  connect: gatewayConnect(["operator.read", "operator.write", "operator.admin"]),
 };
 let harness: Awaited<ReturnType<typeof createGatewaySuiteHarness>>;
 let context: GatewayRequestContext;
@@ -129,18 +125,7 @@ beforeEach(async () => {
   runEmbeddedAgent.mockImplementation(async (params) => {
     modelStarted.resolve(undefined);
     await modelRelease;
-    return {
-      payloads: [{ text: "Goal work continued." }],
-      meta: {
-        durationMs: 0,
-        agentMeta: {
-          sessionId: params.sessionId,
-          provider: "test",
-          model: "test",
-          usage: { input: 1, output: 1 },
-        },
-      },
-    };
+    return goalAgentResult(params.sessionId, "Goal work continued.");
   });
 });
 
@@ -233,7 +218,7 @@ async function withHeldModel(run: () => Promise<void>) {
 function profileClient(profileId: string): GatewayClient {
   return {
     ...client,
-    authenticatedUserProfile: { profileId, displayName: null, hasAvatar: false, updatedAt: 1 },
+    authenticatedUserProfile: gatewayProfile(profileId),
   };
 }
 
@@ -377,8 +362,6 @@ describe("Goal chat admission and continuation", () => {
         const acknowledgedEvents = await eventsAtAck;
         expect(entryAtAck, "fresh Goal commits its own local incarnation").toMatchObject({
           sessionId: expect.any(String),
-          restartRecoveryDeliveryRunId: request.idempotencyKey,
-          restartRecoveryDeliverySourceRunId: request.idempotencyKey,
           goal: { objective: request.message, status: "active" },
         });
         expect(entryAtAck?.status).toBeUndefined();
@@ -443,6 +426,7 @@ describe("Goal chat admission and continuation", () => {
     expect(response.mock.calls[0]?.[2]).toMatchObject({
       code: "INVALID_REQUEST",
       message: expect.stringContaining("recoverable history"),
+      details: { reason: "goal-invalid" },
     });
     expect(loadSessionEntry(scope())).toBeUndefined();
     await expectNoDispatch();
@@ -711,7 +695,7 @@ describe("Goal chat admission and continuation", () => {
     });
   });
 
-  it("keeps a receipt miss retryable when an identical request completes during lookup", async () => {
+  it("replays an identical Goal request committed during its first receipt lookup", async () => {
     const request = goalStart("Replay the Goal committed while this lookup was pending");
     const { entered, release, spy } = holdGoalReceipt();
     const pending = rpc("chat.send", request);
@@ -732,11 +716,12 @@ describe("Goal chat admission and continuation", () => {
       });
       release.resolve();
       const stale = await pending;
-      expect(stale).toHaveBeenCalledWith(
-        false,
-        undefined,
-        expect.objectContaining({ code: "UNAVAILABLE", retryable: true }),
-      );
+      expect(stale.mock.calls[0]?.[0]).toBe(true);
+      expect(stale.mock.calls[0]?.[1]).toMatchObject({
+        replayed: true,
+        runId: request.idempotencyKey,
+        goalId: loadSessionEntry(scope())?.goal?.id,
+      });
       const replay = await rpc("chat.send", request);
       expect(replay.mock.calls[0]?.[1]).toMatchObject({
         replayed: true,
@@ -889,10 +874,9 @@ describe("Goal chat admission and continuation", () => {
       undefined,
       expect.anything(),
     );
-    expect(resumeEntryAtAck?.restartRecoveryOperatorSource).toMatchObject({
-      sourceRunId: request.operationId,
-      sessionId,
-      snapshot: { profileId: profile.id },
+    expect(resumeEntryAtAck?.goal).toMatchObject({
+      id: goal?.id,
+      status: "active",
     });
     await waitForModelRun(2);
     await waitForDispatchEnd();

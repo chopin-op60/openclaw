@@ -43,12 +43,12 @@ import {
   captureAgentToolSourceExecutionGuard,
   runWithAgentToolSourceExecutionScope,
 } from "./agent-tool-source-execution-guard.js";
+import { createProcessSessionId } from "./bash-process-id.js";
 import type { ProcessSession } from "./bash-process-registry.js";
 import {
   addSession,
   appendOutput,
   createProcessSession,
-  isProcessSessionIdTaken,
   markCancellationRequested,
   resolveProcessCleanupMs,
   waitForExecSession,
@@ -68,9 +68,9 @@ import { settleExecProcessExit } from "./bash-tools.exec-settlement.js";
 import type { ExecToolDetails } from "./bash-tools.exec-types.js";
 import type { BashSandboxConfig } from "./bash-tools.shared.js";
 import { chunkString, clampWithDefault, readEnvInt } from "./bash-tools.shared.js";
+import type { ExecApprovalTransport } from "./exec-approval-transport.js";
 import { recordAgentCleanupFailure } from "./run-cleanup-timeout.js";
 import type { AgentToolResult } from "./runtime/index.js";
-import { createSessionSlug } from "./session-slug.js";
 import { createStreamingBinaryOutputSanitizer } from "./shell-utils.js";
 import {
   getGatewayToolCallerIdentity,
@@ -209,6 +209,7 @@ export async function runExecProcess({
   // Execute this instead of `command` (which is kept for display/session/logging).
   // Used to sanitize safeBins execution while preserving the original user input.
   execCommand?: string;
+  approvalTransport?: ExecApprovalTransport;
   workdir: string;
   env: Record<string, string>;
   secretEgressBindings?: readonly SecretEgressSentinelBinding[];
@@ -259,7 +260,7 @@ export async function runExecProcess({
   const operatorSignal = operatorAuthority?.signal;
   let releaseOperatorAuthority: (() => void) | undefined;
   const startedAt = Date.now();
-  const sessionId = createSessionSlug(isProcessSessionIdTaken);
+  const sessionId = createProcessSessionId();
   const execCommand = opts.execCommand ?? opts.command;
   const diagnosticTarget = opts.sandbox ? "sandbox" : "host";
   const supervisor = getProcessSupervisor();
@@ -312,7 +313,18 @@ export async function runExecProcess({
   // Clearing the callback also releases the completed turn's captured authority.
   let onUpdate = initialOnUpdate && AsyncLocalStorage.bind(initialOnUpdate);
   let beforeSpawn = initialBeforeSpawn;
-  let assertPolicyCurrent = initialAssertCurrent;
+  let assertPolicyCurrent: (() => void) | undefined = opts.approvalTransport
+    ? () => {
+        initialAssertCurrent?.();
+        opts.approvalTransport?.assertExecution({
+          command: opts.command,
+          execCommand,
+          cwd: opts.workdir,
+          env: opts.env,
+          pty: opts.usePty,
+        });
+      }
+    : initialAssertCurrent;
   let onSettledBeforeNotify = initialOnSettledBeforeNotify;
 
   const emitUpdate = () => {
@@ -444,7 +456,11 @@ export async function runExecProcess({
       if (outcome.status === "completed") {
         finalOutcome = runtimeErrorOutcome(detail);
       } else {
-        finalOutcome = { ...outcome, reason: joinExecFailureOutput(outcome.reason, detail) };
+        finalOutcome = {
+          ...outcome,
+          message: joinExecFailureOutput(outcome.message, detail),
+          reason: joinExecFailureOutput(outcome.reason, detail),
+        };
         logWarn(`exec: finalization after process failure failed (${detail}).`);
       }
       // Failed commands retain cleanup failures in the same bounded tool output.

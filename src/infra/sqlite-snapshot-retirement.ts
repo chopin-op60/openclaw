@@ -14,6 +14,9 @@ export const SQLITE_SNAPSHOT_LEGACY_MARKER = new RegExp(
   "u",
 );
 const tokenMarker = new RegExp(`^${SQLITE_SNAPSHOT_PREFIX}${suffix}`, "u");
+// fs-safe stages publication beside the target using a lowercase randomUUID().
+const fsSafeTemporaryPayload =
+  /^\.fs-safe-[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}\.tmp$/u;
 export const SQLITE_SNAPSHOT_LEGACY_AGE_MS = 24 * 60 * 60 * 1000;
 function releaseTokens(tokens: Iterable<SqliteStagingToken>): void {
   const failures = collectSynchronousErrors(tokens, (token) => token());
@@ -65,6 +68,13 @@ export function beginSqliteSnapshotRetirement(
       options.cutoff !== undefined && legacy
         ? Math.min(inheritedCutoff, Date.now() - SQLITE_SNAPSHOT_LEGACY_AGE_MS)
         : inheritedCutoff;
+    const recentActivityMessage = legacy
+      ? "Legacy snapshot contains activity newer than 24 hours"
+      : "Snapshot contains activity within the reclamation grace period";
+    // A young directory cannot become eligible by inspecting children or acquiring custody.
+    if (stat.mtimeMs >= cutoff) {
+      throw new Error(recentActivityMessage);
+    }
     if (legacy && lock && options.cutoff !== undefined) {
       inspect(current, cutoff, layout, false);
     }
@@ -111,9 +121,10 @@ export function beginSqliteSnapshotRetirement(
           (layout === "openclaw-state/state"
             ? /^openclaw\.sqlite(?:-wal|-shm|-journal)?$/u.test(entry.name)
             : !layout &&
-              /^(?:first|database\.sqlite(?:\.partial)?(?:-wal|-shm|-journal)?)$/u.test(
+              (/^(?:first|database\.sqlite(?:\.partial)?(?:-wal|-shm|-journal)?)$/u.test(
                 entry.name,
-              )))
+              ) ||
+                fsSafeTemporaryPayload.test(entry.name))))
       ) {
         bytes += item.size;
         if (lock) {
@@ -124,11 +135,7 @@ export function beginSqliteSnapshotRetirement(
       }
     }
     if (newest >= cutoff) {
-      throw new Error(
-        legacy
-          ? "Legacy snapshot contains activity newer than 24 hours"
-          : "Snapshot contains activity within the reclamation grace period",
-      );
+      throw new Error(recentActivityMessage);
     }
     return { bytes, newest };
   }

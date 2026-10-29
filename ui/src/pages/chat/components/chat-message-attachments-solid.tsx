@@ -13,6 +13,7 @@ import {
   safePlainTextAttachmentHref,
   safeMediaAttachmentHref,
 } from "./chat-attachment-href.ts";
+import { openResolvedImage } from "./chat-image-presentation.ts";
 import {
   shouldDeferAttachmentCard,
   type AttachmentAdmission,
@@ -26,7 +27,6 @@ import {
 } from "./chat-message-attachment-source.ts";
 import { AssistantAttachmentStatusCard } from "./chat-message-attachment-status-solid.tsx";
 import { attachmentFailureReason } from "./chat-message-attachment-status.ts";
-import { openResolvedImage } from "./chat-message-image-open.ts";
 import { isLocalAssistantAttachmentSource } from "./chat-message-local-media.ts";
 import {
   resolveAttachmentImageKind,
@@ -143,7 +143,7 @@ export function AssistantAttachments(
         <SentCommentAttachments
           comments={comments()}
           inline={props.inlineComments && files().length === 0}
-          options={props.options}
+          options={{ ...props.options, onMediaChange: refreshComments }}
           resolve={(item) => commentSources().get(item)!}
         />
         <For each={files()} keyed={false}>

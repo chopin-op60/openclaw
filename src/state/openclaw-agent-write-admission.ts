@@ -3,6 +3,7 @@ import { performance } from "node:perf_hooks";
 import { isMainThread, threadId } from "node:worker_threads";
 import { racePromiseWithAbortSignal } from "../../packages/retry/src/index.js";
 import { runWithSqliteDatabaseAdmissionTurn } from "../infra/sqlite-database-admission-turn.js";
+import { getSqliteDatabaseAdmissionIdentityForPath } from "../infra/sqlite-database-admission.js";
 import {
   assertExistingDatabaseIdentity,
   readDatabasePathIdentitySync,
@@ -20,6 +21,7 @@ import {
   type StoreWriterTiming,
 } from "../shared/store-writer-queue.js";
 import { shortenHomePath } from "../utils.js";
+import { isAgentDatabaseStartupReadReady } from "./agent-database-admission.js";
 import type { OpenClawAgentDatabaseOptions } from "./openclaw-agent-db-contract.js";
 import { resolveOpenClawAgentSqlitePath } from "./openclaw-agent-db.paths.js";
 import { agentDatabaseWriteAdmissionState as admission } from "./openclaw-agent-write-admission-state.js";
@@ -251,8 +253,14 @@ export async function runOpenClawAgentWorkerWrite<T>(
 export function runOpenClawAgentBoardReadAdmission<T>(
   options: OpenClawAgentDatabaseOptions,
   run: () => Promise<T>,
+  snapshotOnly = false,
 ): Promise<T> {
   const pathname = resolveOpenClawAgentSqlitePath(options);
+  // Display snapshots need no write ordering while startup refuses all board mutations.
+  // Authority-consumer callbacks retain the FIFO even during startup.
+  if (snapshotOnly && isAgentDatabaseStartupReadReady(pathname, { env: options.env })) {
+    return run();
+  }
   const storePath = readDatabasePathIdentitySync(pathname).canonicalPath;
   return runWithSqliteDatabaseAdmissionTurn([pathname], () =>
     runQueuedStoreWrite({
@@ -273,13 +281,29 @@ export async function runOpenClawAgentWriteAdmissions<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   signal?.throwIfAborted();
-  const selected = new Map(
-    options.map((option) => [resolveOpenClawAgentSqlitePath(option), option]),
-  );
-  const paths = [...selected.keys()].toSorted();
+  let selected = new Map(options.map((option) => [resolveOpenClawAgentSqlitePath(option), option]));
   const inherited = [...admission.queues.keys()].filter((pathname) =>
     isActiveStoreWriter(admission.queues, pathname),
   );
+  if (selected.size > 1) {
+    const physicalKey = (pathname: string) => {
+      const identity =
+        getSqliteDatabaseAdmissionIdentityForPath(pathname) ??
+        readDatabasePathIdentitySync(pathname);
+      return `${identity.key}:${identity.birthtime ?? ""}`;
+    };
+    // Borrow the held queue's spelling when multiple locators name the same file.
+    const representatives = new Map(inherited.map((pathname) => [physicalKey(pathname), pathname]));
+    const physical = new Map<string, OpenClawAgentDatabaseOptions>();
+    for (const [pathname, option] of selected) {
+      const identity = physicalKey(pathname);
+      const representative = representatives.get(identity) ?? pathname;
+      representatives.set(identity, representative);
+      physical.set(representative, { ...option, path: representative });
+    }
+    selected = physical;
+  }
+  const paths = [...selected.keys()].toSorted();
   // A nested reader may share one foreground FIFO, never a reserved worker transaction.
   const conflicting = paths.find(
     (pathname) =>

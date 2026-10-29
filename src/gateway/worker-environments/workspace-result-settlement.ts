@@ -6,6 +6,7 @@ import type {
   WorkerSessionTurnClaim,
 } from "./placement-store.js";
 import type { PlacementTurnClaimCurrentCheck } from "./placement-turn-claims.types.js";
+import { withSessionRepositoryCheckpoint } from "./session-repository-checkpoints.js";
 import { sessionWorkspaceRoot, type WorkerSessionWorkspace } from "./session-workspace.js";
 import { boundedWorkerError } from "./worker-error.js";
 import {
@@ -27,7 +28,21 @@ export async function adoptReclaimedWorkspaceHistory(
     stagedResultRef: string | null | undefined;
   },
 ): Promise<void> {
-  if (params.workspace.kind !== "local" || !params.stagedResultRef) {
+  if (params.workspace.kind === "device-folder" || !params.stagedResultRef) {
+    return;
+  }
+  if (params.workspace.kind === "repository") {
+    await withSessionRepositoryCheckpoint(
+      {
+        workspaceId: params.workspace.repository.workspaceId,
+        checkpointRef: params.stagedResultRef,
+      },
+      async (snapshot) => {
+        if (snapshot.gitHistoryNote) {
+          await params.reportNote(snapshot.gitHistoryNote);
+        }
+      },
+    );
     return;
   }
   const note = await adoptStagedWorkerWorkspaceHistory({
@@ -188,6 +203,7 @@ type StagedWorkspaceResultSettlement = {
   workspace: WorkerSessionWorkspace;
   stagedResultRef: string | null | undefined;
   conflictRetained: boolean;
+  closeToolState?: false;
   beforeComplete: () => Promise<void>;
   complete?: () => Promise<WorkerSessionPlacementRecord>;
   afterComplete?: (completed: WorkerSessionPlacementRecord) => Promise<void>;
@@ -196,7 +212,7 @@ export async function settleStagedWorkspaceResult(
   params: StagedWorkspaceResultSettlement,
 ): Promise<WorkerSessionPlacementRecord> {
   params.assertCurrent();
-  if (params.turnClaim.owner.kind === "worker") {
+  if (params.turnClaim.owner.kind === "worker" && params.closeToolState !== false) {
     await params.placements.closeWorkerTurnToolState(params.turnClaim);
     params.assertCurrent();
   }

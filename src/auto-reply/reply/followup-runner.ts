@@ -38,10 +38,9 @@ import {
   type FollowupRunnerParams,
 } from "./reply-agent-turn-preparation.js";
 import { runWithReplyOperationLifecycleAdmission } from "./reply-turn-admission-lifecycle.js";
-import { resolveReplyAdmissionRunId } from "./source-turn-id.js";
 import {
   isReplyOperationStalledBeforeOutput,
-  STALLED_TURN_NOTICE_TEXT,
+  resolveStalledTurnNoticeText,
 } from "./stalled-turn-recovery.js";
 
 type FollowupDrainDisposition = { kind: "consumed" } | { kind: "retry"; error: unknown };
@@ -186,9 +185,6 @@ export function createFollowupRunner(
       const admission = await prepareReplyAgentTurn({
         queued,
         defaults,
-        recoveryAdmissionRunId: resolveReplyAdmissionRunId({
-          MessageSid: resolveFollowupCurrentMessageId(queued),
-        }),
         onOperationOwned: (owned) => {
           operation = owned;
         },
@@ -270,7 +266,7 @@ export function createFollowupRunner(
         isReplyOperationStalledBeforeOutput(turn.operation)
           ? // A watchdog stall is a failure, not a user cancel: source owners
             // surface its last-resort notice through their terminal error.
-            { kind: "failed", error: STALLED_TURN_NOTICE_TEXT }
+            { kind: "failed", error: resolveStalledTurnNoticeText(turn.operation) }
           : resolveFollowupCompletion(execution.execution.outcome);
       try {
         await execution.progress.drain();
@@ -314,15 +310,8 @@ export function createFollowupRunner(
             storePath: turn.session.kind === "session" ? turn.session.storePath : undefined,
             sessionKey: turn.session.kind === "session" ? turn.session.key : undefined,
             entry: turn.session.current(),
-            writer:
-              execution.execution.outcome.kind === "settled"
-                ? execution.execution.outcome.sessionWriter
-                : undefined,
+            writer: execution.execution.outcome.sessionWriter,
             operation: turn.operation,
-            prepareRestartClaimCleanup:
-              execution.execution.outcome.kind === "settled"
-                ? turn.restartRecovery?.prepareCompletionCleanup
-                : undefined,
             activitySummaryCompletion,
             publish: (entry) => turn.session.publish(entry),
           },
@@ -501,13 +490,6 @@ export function createFollowupRunner(
           claim.retryBeforeExecution = false;
         }
         completeFollowupRunLifecycle(queued);
-      }
-      try {
-        await admittedTurn?.restartRecovery?.clear();
-      } catch (error) {
-        defaultRuntime.error?.(
-          `followup queue: recovery settlement failed: ${formatErrorMessage(error)}`,
-        );
       }
       if (admittedTurn?.runId) {
         clearAgentRunContext(admittedTurn.runId);
